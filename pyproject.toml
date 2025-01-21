@@ -1,0 +1,11 @@
+[project]
+name = "ctt"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["jax>=0.4.30", "jaxtyping>=0.2.36", "matplotlib>=3.9.4"]
+
+
+[tool.ruff.lint]
+ignore = ["F722", "F821"]
