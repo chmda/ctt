@@ -1,5 +1,5 @@
 import math
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol
 
 import jax.numpy as jnp
 import jax.random as random
@@ -7,6 +7,16 @@ from jaxtyping import Array, Float, PRNGKeyArray
 
 TTCore = Float[Array, "r0 m r1"]
 TT = list[TTCore]
+
+
+class RankRule(Protocol):
+    def __call__(
+        self,
+        u: Float[Array, "n*r0 r"],
+        s: Float[Array, "r"],
+        vh: Float[Array, "r r1"],
+        pos: int,
+    ) -> int: ...
 
 
 def tt_size(tt: TT) -> int:
@@ -43,12 +53,7 @@ def tt_dot_rank_one(a: TT, b: list[Float[Array, "m"]]) -> float:
     return tt_dot(a, cores)
 
 
-def _tt_modify_ranks(
-    tt: TT,
-    rule: Callable[
-        [Float[Array, "n*r0 r"], Float[Array, "r"], Float[Array, "r r1"], int], int
-    ],
-) -> TT:
+def _tt_modify_ranks(tt: TT, rule: RankRule) -> TT:
     new_cores = [core.copy() for core in tt]
     for pos in range(len(tt) - 1):
         core = new_cores[pos]
