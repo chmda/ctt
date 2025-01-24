@@ -4,6 +4,8 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
+__all__ = ["Control", "discrete_pmp", "batch_pmp"]
+
 ArrayTree = Union[Array, Iterable["ArrayTree"], Mapping[Any, "ArrayTree"]]
 Control = ArrayTree
 
@@ -27,18 +29,20 @@ def discrete_pmp(
             return next_state, next_state
 
         _, states = jax.lax.scan(_body_fn, x0, jnp.arange(0, num_steps))
-        states = jnp.concatenate([x0, states])
+        states = jnp.concatenate([x0[None], states], axis=0)
         return states
 
     def _solve_costate(
         controls: list[Control], states: Float[Array, "steps N"]
     ) -> Float[Array, "steps"]:
-        def _body_fn(costatae, idx):
+        def _body_fn(costate, idx):
             control = jax.lax.switch(idx, [lambda u=u: u for u in controls])
             xk = states[idx, :]  # x_k
             previous_costate = (
                 jax.grad(regularization, argnums=0)(xk, control)
-                + jax.grad(transition, argnums=0)(xk, control) @ costatae
+                # + jax.jacfwd(transition, argnums=0)(xk, control) @ costatae
+                # + jax.jacfwd(transition, argnums=0)(xk, control) @ costatae
+                + jax.jvp(lambda x: transition(x, control), (xk,), (costate,))[1]
             )
             return previous_costate, previous_costate
 
@@ -46,7 +50,7 @@ def discrete_pmp(
         _, costates = jax.lax.scan(
             _body_fn, terminal_point, jnp.arange(0, num_steps), reverse=True
         )
-        costates = jnp.concatenate([costates, terminal_cost])
+        costates = jnp.concatenate([costates, terminal_point[None]], axis=0)
         return costates
 
     def _solve_pmp(controls: list[Control]) -> list[Control]:
@@ -83,7 +87,7 @@ def batch_pmp(
     def _transition(xk: Float[Array, "N"], control: Control) -> Float[Array, "N"]:
         xk = jnp.reshape(xk, (B, d))
         val = transition(xk, control)
-        val = jnp.reshape(val, xk.shape)
+        val = jnp.ravel(val)
         return val
 
     def _min_hamiltoninan(

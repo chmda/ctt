@@ -1,9 +1,29 @@
 import math
 from typing import Callable, Optional, Protocol
 
+import jax
 import jax.numpy as jnp
 import jax.random as random
 from jaxtyping import Array, Float, PRNGKeyArray
+
+__all__ = [
+    "TTCore",
+    "TT",
+    "tt_size",
+    "tt_dims",
+    "tt_ranks",
+    "tt_mul_scalar",
+    "tt_dot",
+    "tt_norm",
+    "tt_dot_rank_one",
+    "tt_round",
+    "tt_retract",
+    "canonical_to_tt",
+    "tt_rand",
+    "tt_randn",
+    "tt_zeros",
+    "tt_matvec",
+]
 
 TTCore = Float[Array, "r0 m r1"]
 TT = list[TTCore]
@@ -36,6 +56,26 @@ def tt_mul_scalar(tt: TT, val: float) -> TT:
     return [new_core] + tt[1:]
 
 
+def tt_add(a: TT, b: TT) -> TT:
+    assert all(c1.shape[1] == c2.shape[1] for c1, c2 in zip(a, b))
+
+    comps = [jnp.concatenate((a[0], b[0]), axis=2)]
+
+    for mu in range(1, len(a) - 1):
+        c1, c2 = a[mu], b[mu]
+        rp1, _, rpp1 = c1.shape
+        rp2, _, rpp2 = c2.shape
+        data = jnp.zeros((rp1 + rp2, c1.shape[1], rpp1 + rpp2))
+        data = data.at[:rp1, :, :rpp1].set(c1)
+        data = data.at[rp1:, :, rpp1:].set(c2)
+        comps.append(data)
+
+    data = jnp.concatenate((a[-1][:, :, 0], b[-1][:, :, 0]), axis=0)
+    data = data[..., None]
+    comps.append(data)
+    return comps
+
+
 def tt_dot(a: TT, b: TT) -> float:
     assert len(a) == len(b), "the two TTs must be of the same order"
     res = jnp.einsum("oab,oac->obc", a[0], b[0])
@@ -53,6 +93,13 @@ def tt_dot_rank_one(a: TT, b: list[Float[Array, "m"]]) -> float:
     return tt_dot(a, cores)
 
 
+def tt_matvec(tt: TT, x: list[Float[Array, "m"]]) -> Float[Array, "r0 rd"]:
+    res = jnp.einsum("oab,a->ob", tt[0], x[0])
+    for i in range(1, len(tt)):
+        res = jnp.einsum("ob,bnd,n->od", res, tt[i], x[i])
+    return res
+
+
 def _tt_modify_ranks(tt: TT, rule: RankRule) -> TT:
     new_cores = [core.copy() for core in tt]
     for pos in range(len(tt) - 1):
@@ -66,7 +113,9 @@ def _tt_modify_ranks(tt: TT, rule: RankRule) -> TT:
 
         u, s, vh = u[:, :new_rank], s[:new_rank], vh[:new_rank, :]
         new_cores[pos] = u.reshape((shape[0], shape[1], new_rank))
-        new_cores[pos + 1] = jnp.einsum("ir,rkl->ikl", s * vh, new_cores[pos + 1])
+        new_cores[pos + 1] = jnp.einsum(
+            "ir,rkl->ikl", s[:, None] * vh, new_cores[pos + 1]
+        )
 
     return new_cores
 
@@ -80,28 +129,54 @@ def tt_round(tt: TT, epsilon: float) -> TT:
     return _tt_modify_ranks(tt, rule)
 
 
-def tt_retract(tt: TT, ranks: list[int]) -> TT:
+def tt_retract(tt: TT, inner_ranks: list[int]) -> TT:
     def rule(u, s, vh, pos):
-        return ranks[pos]
+        return inner_ranks[pos]
 
     return _tt_modify_ranks(tt, rule)
 
 
 def canonical_to_tt(cores: list[Float[Array, "r n"]]) -> TT:
-    new_cores = []
-    new_cores[0] = cores[0][None, ...]
+    # new_cores = []
+    # new_cores[0] = cores[0][None, ...]
 
-    for mu in range(1, len(cores) - 1):
-        factor = cores[mu]
-        core = jnp.zeros(
-            (factor.shape[0], factor.shape[0] + 1, factor.shape[1]), dtype=factor.dtype
-        )
-        core = core.at[..., 0, :].set(factor)
-        core = core.reshape((factor.shape[0] + 1, factor.shape[0], factor.shape[1]))
-        core = jnp.transpose(core, (0, 2, 1))
-        new_cores.append(core[..., :-1, :, :])
+    # for mu in range(1, len(cores) - 1):
+    #     factor = cores[mu]
+    #     core = jnp.zeros(
+    #         (factor.shape[0], factor.shape[0] + 1, factor.shape[1]), dtype=factor.dtype
+    #     )
+    #     core = core.at[..., 0, :].set(factor)
+    #     core = core.reshape((factor.shape[0] + 1, factor.shape[0], factor.shape[1]))
+    #     core = jnp.transpose(core, (0, 2, 1))
+    #     new_cores.append(core[..., :-1, :, :])
 
-    return new_cores
+    # return new_cores
+
+    # tt_cores = [None] * len(cores)
+    # tt_cores[0] = cores[0].copy()[None, ...]
+    # tt_cores[-1] = cores[-1].copy()[..., None]
+
+    def _factor_to_core(factor: Float[Array, "r n"]) -> Float[Array, "r n r"]:
+        r, n = factor.shape
+        """
+        core = jnp.zeros((r, n, r), dtype=factor.dtype)
+        return core.at[jnp.arange(r), :, jnp.arange(r)].set(core)
+        """
+        return jax.vmap(jnp.diag, in_axes=1)(factor).transpose(2, 0, 1)
+
+    tt_cores = (
+        [cores[0].copy()[None, ...]]
+        + jax.tree.map(_factor_to_core, cores[1:-1])
+        + [cores[-1].copy()[..., None]]
+    )
+
+    # for mu in range(1, len(cores) - 1):
+    #     factor = cores[mu]
+    #     R, N = factor.shape
+    #     core = jnp.zeros((R, N, R), dtype=factor.dtype)
+    #     tt_cores[mu] = core.at[jnp.arange(R), :, jnp.arange(R)].set(factor)
+
+    return tt_cores
 
 
 def _make_tt(

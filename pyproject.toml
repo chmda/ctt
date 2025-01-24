@@ -9,3 +9,8 @@ dependencies = ["jax>=0.4.30", "jaxtyping>=0.2.36", "matplotlib>=3.9.4"]
 
 [tool.ruff.lint]
 ignore = ["F722", "F821"]
+
+[dependency-groups]
+dev = [
+    "ipython>=8.18.1",
+]
