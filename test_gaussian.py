@@ -4,23 +4,50 @@ import jax
 import jax.numpy as jnp
 import jax.random as random
 import matplotlib.pyplot as plt
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, PRNGKeyArray
 
-from ctt.bases import make_fourier
+from ctt.bases import make_canonical_polynomials
 from ctt.optimizer import Control, batch_pmp
-from ctt.tt import TT, tt_matvec, tt_mul_scalar, tt_norm, tt_zeros
+from ctt.tt import TT, tt_add, tt_matvec, tt_mul_scalar, tt_norm, tt_retract, tt_zeros
 
-d = 2
+jax.config.update("jax_enable_x64", True)
+
+d = 5
 n_features = 2
-basis = make_fourier(dim=n_features, domain=(-5.0, 5.0))
+# basis = make_fourier(dim=n_features, domain=(-3.0, 3.0))
+basis = make_canonical_polynomials(n_features)
+# basis = lambda x: jnp.array([1.0, x, jnp.abs(x)])
 bases = [basis] * (d + 1)
+key = random.PRNGKey(42)
+
+
+def _random_cov_matrix(key: PRNGKeyArray, d: int, l: int = 2) -> Float[Array, "d d"]:
+    A = random.uniform(key=key, shape=(d, d), minval=-1.0, maxval=1.0)
+    prec = A @ A.T
+
+    error = 1.0
+    while error > 1e-4:
+        for i in range(d - 1):
+            sub_diag = prec[i + 1 :, : i + 1]
+            u, s, vh = jnp.linalg.svd(sub_diag, full_matrices=False)
+            s = jnp.zeros_like(s)
+            s = s.at[: min(l, s.shape[0])].set(1.0)
+            new_prec = prec.at[i + 1 :, : i + 1].set((u * s) @ vh)
+            new_prec = new_prec.at[: i + 1, i + 1 :].set(new_prec[i + 1 :, : i + 1].T)
+            error = jnp.linalg.norm(prec - new_prec) / jnp.linalg.norm(prec)
+            prec = new_prec
+
+    return jnp.linalg.inv(prec)
+
+
+key, cov_key = random.split(key)
+# cov = _random_cov_matrix(key=cov_key, d=d, l=2)
 
 
 @jax.jit
 def target(x: Float[Array, "d"]) -> float:
-    return jax.scipy.stats.multivariate_normal.pdf(
-        x, mean=jnp.zeros_like(x), cov=jnp.eye(x.shape[0])
-    )
+    # return jax.scipy.stats.multivariate_normal.pdf(x, mean=jnp.zeros_like(x), cov=cov)
+    return 1.0 / (1.0 + jnp.mean(x))
 
 
 def _ftt(x: Float[Array, "d"], tt: TT) -> Float[Array, "d"]:
@@ -84,6 +111,7 @@ def _compute_B(
 def min_hamiltonian(
     states: Float[Array, "B d"],
     costates: Float[Array, "B d"],
+    control: Control,
     coefficient: float,
     ranks: list[int],
     radius: Optional[float] = None,
@@ -92,22 +120,16 @@ def min_hamiltonian(
     features = [
         jax.vmap(bases[i])(states[:, i]) for i in range(states.shape[1])
     ]  # (B, m)*d
-    # first_comp = jnp.einsum("bo,bn->bon", costates, features[0])  # (B, d, m)
-    # first_comp = first_comp[..., None]  # (B, d, m, 1)
-    # tensors = [
-    #     [first_comp[n, :, :, :]]
-    #     + [features[i][n, :][None, :, None] for i in range(1, states.shape[1])]
-    #     for n in range(B)
-    # ]
-    # tt = functools.reduce(tt_add, tensors)  # NOTE: very slow
-    # TODO: do canonical to tt manifold of bounded ranks
     tt = _compute_B(features, costates, ranks)
     tt = tt_mul_scalar(tt, -1.0 / coefficient)
+    lr = 1e-5
+    tt = tt_add(tt_mul_scalar(control, 1.0 - lr), tt_mul_scalar(tt, lr))
+    tt = tt_retract(tt, ranks)
     if radius:
         # project the TT to the closed ball of radius `radius`
         norm = tt_norm(tt)
         tt = jax.lax.cond(
-            norm <= radius, lambda u: u, lambda u: tt_mul_scalar(u, 1.0 / norm), tt
+            norm <= radius, lambda u: u, lambda u: tt_mul_scalar(u, radius / norm), tt
         )
 
     return tt
@@ -124,25 +146,30 @@ def compute_ctt(x: Float[Array, "B d"], controls: list[Control]) -> Float[Array,
     return result
 
 
-key = random.PRNGKey(0)
 key, train_key, test_key = random.split(key, 3)
 
-N_train = 10_000
-X_train = random.normal(key=train_key, shape=(N_train, d))
+N_train = 3000
+# X_train = random.multivariate_normal(
+#     key=train_key, mean=jnp.zeros(d), cov=cov, shape=(N_train,)
+# )
+X_train = random.uniform(key=train_key, shape=(N_train, d), minval=0.0, maxval=1.0)
 y_train = jax.vmap(target)(X_train)
 X_train = jnp.concatenate((jnp.ones((N_train, 1)), X_train), axis=1)
 y_train = jnp.concatenate((y_train[:, None], X_train[:, 1:]), axis=1)
 
 N_test = 1000
-X_test = random.normal(key=test_key, shape=(N_test, d))
+# X_test = random.multivariate_normal(
+#     key=train_key, mean=jnp.zeros(d), cov=cov, shape=(N_test,)
+# )
+X_test = random.uniform(key=test_key, shape=(N_test, d), minval=0.0, maxval=1.0)
 y_test = jax.vmap(target)(X_test)
 X_test = jnp.concatenate((jnp.ones((N_test, 1)), X_test), axis=1)
 y_test = jnp.concatenate((y_test[:, None], X_test[:, 1:]), axis=1)
 
-num_steps = 10
-regularization_coeff = 1e-2
-radius = 5.0
-ranks = [d + 1] + [4] * (d) + [1]
+num_steps = 5
+regularization_coeff = 1e-4
+radius = 1.0
+ranks = [d + 1] + [2] * (d) + [1]
 pmp = batch_pmp(
     regularization=jax.tree_util.Partial(
         regularization, coefficient=regularization_coeff
@@ -159,13 +186,13 @@ pmp = jax.jit(pmp)
 
 control_keys = random.split(key, num=num_steps)
 init_controls = [
-    # tt_randn(control_key, [n_features] * (d + 1), ranks)
+    # tt_randn(control_key, [n_features] * (d + 1), ranks, cov=2.0)
     # for control_key in control_keys
     tt_zeros([n_features] * (d + 1), ranks)
     for _ in control_keys
 ]
 
-opt_steps = 20
+opt_steps = 100
 controls = init_controls
 losses = []
 for i in range(opt_steps):
@@ -176,7 +203,13 @@ for i in range(opt_steps):
     print(f"Iter {i} | Loss: {loss:.3e}")
 
 # plot the loss
-plt.semilogy(jnp.arange(opt_steps), losses, label="Loss")
+plt.semilogy(jnp.arange(opt_steps), jnp.sqrt(jnp.asarray(losses)), label="Absolute L2")
+plt.semilogy(
+    jnp.arange(opt_steps),
+    jnp.sqrt(jnp.asarray(losses) / terminal_cost(jnp.zeros_like(y_test), y_test)),
+    label="Relative L2",
+)
+plt.xticks(jnp.arange(opt_steps))
 plt.grid()
 plt.legend()
 plt.xlabel("Iterations")

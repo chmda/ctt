@@ -129,9 +129,9 @@ def tt_round(tt: TT, epsilon: float) -> TT:
     return _tt_modify_ranks(tt, rule)
 
 
-def tt_retract(tt: TT, inner_ranks: list[int]) -> TT:
+def tt_retract(tt: TT, ranks: list[int]) -> TT:
     def rule(u, s, vh, pos):
-        return inner_ranks[pos]
+        return ranks[pos + 1]
 
     return _tt_modify_ranks(tt, rule)
 
@@ -221,7 +221,9 @@ def tt_randn(
 ) -> TT:
     def func(shape, key):
         key, sample_key = random.split(key)
-        return mean + cov * random.normal(key=sample_key, shape=shape), key
+        return mean + cov * random.normal(key=sample_key, shape=shape) / jnp.prod(
+            jnp.asarray(shape)
+        ), key
 
     return _make_tt(dims, ranks, func, key)
 

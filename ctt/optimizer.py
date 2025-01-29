@@ -18,7 +18,7 @@ def discrete_pmp(
     regularization: Callable[[Float[Array, "N"], Control], float],
     terminal_cost: Callable[[Float[Array, "N"]], float],
     transition: Callable[[Float[Array, "N"], Control], Float[Array, "N"]],
-    min_hamiltonian: Callable[[Float[Array, "N"], Float[Array, "N"]], Control],
+    min_hamiltonian: Callable[[Float[Array, "N"], Float[Array, "N"], Control], Control],
     x0: Float[Array, "N"],
     num_steps: int,
 ) -> PMP:
@@ -57,7 +57,8 @@ def discrete_pmp(
         states = _solve_state(controls)
         costates = _solve_costate(controls, states)
         new_controls = [
-            min_hamiltonian(states[i, :], costates[i + 1, :]) for i in range(num_steps)
+            min_hamiltonian(states[i, :], costates[i + 1, :], controls[i])
+            for i in range(num_steps)
         ]
         return new_controls
 
@@ -68,7 +69,9 @@ def batch_pmp(
     regularization: Callable[[Float[Array, "B d"], Control], float],
     terminal_cost: Callable[[Float[Array, "B d"]], float],
     transition: Callable[[Float[Array, "B d"], Control], Float[Array, "B d"]],
-    min_hamiltonian: Callable[[Float[Array, "B d"], Float[Array, "B d"]], Control],
+    min_hamiltonian: Callable[
+        [Float[Array, "B d"], Float[Array, "B d"], Control], Control
+    ],
     x0: Float[Array, "B d"],
     num_steps: int,
 ) -> PMP:
@@ -91,11 +94,11 @@ def batch_pmp(
         return val
 
     def _min_hamiltoninan(
-        state: Float[Array, "N"], costate: Float[Array, "N"]
+        state: Float[Array, "N"], costate: Float[Array, "N"], control: Control
     ) -> Control:
         state = jnp.reshape(state, (B, d))
         costate = jnp.reshape(costate, (B, d))
-        val = min_hamiltonian(state, costate)
+        val = min_hamiltonian(state, costate, control)
         return val
 
     return discrete_pmp(
