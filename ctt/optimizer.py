@@ -1,4 +1,4 @@
-from typing import Any, Callable, Iterable, Mapping, Protocol, Union
+from typing import Any, Callable, Iterable, Mapping, Optional, Protocol, Union
 
 import jax
 import jax.numpy as jnp
@@ -11,7 +11,9 @@ Control = ArrayTree
 
 
 class PMP(Protocol):
-    def __call__(self, controls: list[Control]) -> list[Control]: ...
+    def __call__(
+        self, controls: list[Control], *args: Any, **kwargs: Any
+    ) -> list[Control]: ...
 
 
 def discrete_pmp(
@@ -109,3 +111,65 @@ def batch_pmp(
         x0=jnp.ravel(x0),
         num_steps=num_steps,
     )
+
+
+def mini_batch_pmp(
+    regularization: Callable[[Float[Array, "B d_lift"], Control], float],
+    terminal_cost: Callable[
+        [Float[Array, "B d_lift"], Optional[Float[Array, "B d_o"]]], float
+    ],
+    transition: Callable[[Float[Array, "B d_lift"], Control], Float[Array, "B d"]],
+    min_hamiltonian: Callable[
+        [Float[Array, "B d_lift"], Float[Array, "B d_lift"], Control], Control
+    ],
+    num_steps: int,
+) -> PMP:
+    def _solve_state(
+        controls: list[Control], x0: Float[Array, "B d_lift"]
+    ) -> Float[Array, "steps B d_lift"]:
+        def _body_fn(xk, idx):
+            control = jax.lax.switch(idx, [lambda u=u: u for u in controls])
+            next_state = transition(xk, control)
+            return next_state, next_state
+
+        _, states = jax.lax.scan(_body_fn, x0, jnp.arange(0, num_steps))
+        states = jnp.concatenate([x0[None], states], axis=0)
+        return states
+
+    def _solve_costate(
+        controls: list[Control],
+        states: Float[Array, "steps B d_lift"],
+        yN: Optional[Float[Array, "B d_o"]] = None,
+    ) -> Float[Array, "steps"]:
+        def _body_fn(costate, idx):
+            control = jax.lax.switch(idx, [lambda u=u: u for u in controls])
+            xk = states[idx, ...]  # x_k
+            previous_costate = (
+                jax.grad(regularization, argnums=0)(xk, control)
+                # + jax.jacfwd(transition, argnums=0)(xk, control) @ costatae
+                # + jax.jacfwd(transition, argnums=0)(xk, control) @ costatae
+                + jax.jvp(lambda x: transition(x, control), (xk,), (costate,))[1]
+            )
+            return previous_costate, previous_costate
+
+        terminal_point = jax.grad(terminal_cost)(states[-1, :], yN)
+        _, costates = jax.lax.scan(
+            _body_fn, terminal_point, jnp.arange(0, num_steps), reverse=True
+        )
+        costates = jnp.concatenate([costates, terminal_point[None]], axis=0)
+        return costates
+
+    def _solve_pmp(
+        controls: list[Control],
+        x0: Float[Array, "B d_lift"],
+        yN: Optional[Float[Array, "B d_o"]] = None,
+    ) -> list[Control]:
+        states = _solve_state(controls, x0)
+        costates = _solve_costate(controls, states, yN)
+        new_controls = [
+            min_hamiltonian(states[i, :], costates[i + 1, :], controls[i])
+            for i in range(num_steps)
+        ]
+        return new_controls
+
+    return _solve_pmp

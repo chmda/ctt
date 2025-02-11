@@ -40,23 +40,112 @@ class RankRule(Protocol):
 
 
 def tt_size(tt: TT) -> int:
+    """
+    Calculates the total number of elements in the TT representation.
+
+    Parameters
+    ----------
+    tt : TT
+        Tensor Train object represented as a list of jax.numpy.ndarray
+        cores.
+
+    Returns
+    -------
+    int
+        Total number of elements in the TT cores.
+    """
     return sum(core.size for core in tt)
 
 
 def tt_dims(tt: TT) -> list[int]:
+    """
+    Extracts the dimensions of the tensor represented by the TT.
+
+    The dimensions are inferred from the shape of the TT cores. Specifically,
+    it returns a list of the second dimension (mode size) of each core.
+
+    Parameters
+    ----------
+    tt : TT
+        Tensor Train object represented as a list of jax.numpy.ndarray
+        cores.
+
+    Returns
+    -------
+    list[int]
+        List of dimensions of the tensor represented by the TT.
+    """
     return [core.shape[1] for core in tt]
 
 
 def tt_ranks(tt: TT) -> list[int]:
+    """
+    Extracts the TT-ranks of the TT representation.
+
+    Parameters
+    ----------
+    tt : TT
+        Tensor Train object represented as a list of jax.numpy.ndarray
+        cores.
+
+    Returns
+    -------
+    list[int]
+        List of TT-ranks.
+    """
     return [core.shape[0] for core in tt] + [tt[-1].shape[2]]
 
 
 def tt_mul_scalar(tt: TT, val: float) -> TT:
+    """
+    Multiplies a TT object by a scalar value.
+
+    This function scales the first core of the TT object by the given scalar
+    value.
+
+    Parameters
+    ----------
+    tt : TT
+        Tensor Train object represented as a list of jax.numpy.ndarray
+        cores.
+    val : float
+        Scalar value to multiply the TT object by.
+
+    Returns
+    -------
+    TT
+        New TT object representing the scaled tensor.
+    """
     new_core = val * tt[0]
     return [new_core] + tt[1:]
 
 
 def tt_add(a: TT, b: TT) -> TT:
+    """
+    Adds two TT objects together.
+
+    This function performs element-wise addition of two tensors represented
+    in the Tensor Train format. It assumes that the two TT objects have
+    compatible dimensions.
+
+    Parameters
+    ----------
+    a : TT
+        First Tensor Train object.
+    b : TT
+        Second Tensor Train object.
+
+    Returns
+    -------
+    TT
+        New TT object representing the sum of the two input TT objects.
+
+    Raises
+    ------
+    AssertionError
+        If the dimensions of the input TT objects are not compatible
+        (i.e., if their mode sizes do not match).
+    """
     assert all(c1.shape[1] == c2.shape[1] for c1, c2 in zip(a, b))
 
     comps = [jnp.concatenate((a[0], b[0]), axis=2)]
@@ -77,6 +166,31 @@ def tt_add(a: TT, b: TT) -> TT:
 
 
 def tt_dot(a: TT, b: TT) -> float:
+    """
+    Computes the dot product of two TT objects.
+
+    This function calculates the inner product of two tensors represented
+    in the Tensor Train format. It assumes that the two TT objects have
+    the same order and compatible dimensions.
+
+    Parameters
+    ----------
+    a : TT
+        First Tensor Train object.
+    b : TT
+        Second Tensor Train object.
+
+    Returns
+    -------
+    float
+        The dot product of the two TT objects.
+
+    Raises
+    ------
+    AssertionError
+        If the two TT objects are not of the same order (i.e., do not
+        have the same number of cores).
+    """
     assert len(a) == len(b), "the two TTs must be of the same order"
     res = jnp.einsum("oab,oac->obc", a[0], b[0])
     for i in range(1, len(a)):
@@ -85,15 +199,74 @@ def tt_dot(a: TT, b: TT) -> float:
 
 
 def tt_norm(tt: TT) -> float:
+    """
+    Computes the Frobenius norm of a TT object.
+
+    This function calculates the Frobenius norm of a tensor
+    represented in the Tensor Train format.
+
+    Parameters
+    ----------
+    tt : TT
+        Tensor Train object.
+
+    Returns
+    -------
+    float
+        The Frobenius norm of the TT object.
+    """
     return jnp.sqrt(tt_dot(tt, tt))
 
 
 def tt_dot_rank_one(a: TT, b: list[Float[Array, "m"]]) -> float:
+    """
+    Computes the dot product of a TT object and a rank-one TT.
+
+    The rank-one TT is given in factorized form as a list of vectors.
+    This is an efficient way to compute the dot product when one of the
+    tensors is rank-one.
+
+    Parameters
+    ----------
+    a : TT
+        Tensor Train object.
+    b : list[Float[Array, "m"]]
+        List of vectors representing the rank-one TT in factorized form.
+        Each element in the list is a jax.numpy.ndarray of shape (m_i,),
+        where m_i is the dimension of the i-th mode.
+
+    Returns
+    -------
+    float
+        The dot product of the TT object and the rank-one TT.
+    """
     cores = [v.reshape(1, -1, 1) for v in b]
     return tt_dot(a, cores)
 
 
 def tt_matvec(tt: TT, x: list[Float[Array, "m"]]) -> Float[Array, "r0 rd"]:
+    """
+    Performs matrix-vector multiplication in TT format.
+
+    This function computes the product of a matrix in Tensor Train format
+    and a vector, where the vector is also given in a factorized form
+    suitable for TT operations (list of vectors for each mode).
+
+    Parameters
+    ----------
+    tt : TT
+        Tensor Train object representing the matrix.
+    x : list[Float[Array, "m"]]
+        List of vectors representing the input vector in factorized form.
+        Each element in the list is a jax.numpy.ndarray of shape (m_i,),
+        where m_i is the dimension of the i-th mode.
+
+    Returns
+    -------
+    Float[Array, "r0 rd"]
+        The resulting vector from the matrix-vector multiplication,
+        represented as a jax.numpy.ndarray.
+    """
     res = jnp.einsum("oab,a->ob", tt[0], x[0])
     for i in range(1, len(tt)):
         res = jnp.einsum("ob,bnd,n->od", res, tt[i], x[i])
@@ -101,6 +274,39 @@ def tt_matvec(tt: TT, x: list[Float[Array, "m"]]) -> Float[Array, "r0 rd"]:
 
 
 def _tt_modify_ranks(tt: TT, rule: RankRule) -> TT:
+    """
+    Modifies the ranks of a TT object according to a given rule.
+
+    This is a helper function that applies a rank modification rule to each
+    core of a Tensor Train object. It iterates through the cores, performs
+    an SVD on each core (reshaped as a matrix), applies the provided `rule`
+    function to determine the new rank, truncates the SVD components to
+    the new rank, and updates the TT cores accordingly.
+
+    Parameters
+    ----------
+    tt : TT
+        Tensor Train object to modify.
+    rule : RankRule
+        A function that determines the new rank at each position.
+        The function should accept four arguments:
+          - u: Left singular vectors (jax.numpy.ndarray)
+          - s: Singular values (jax.numpy.ndarray)
+          - vh: Right singular vectors (jax.numpy.ndarray)
+          - pos: The current core position (int, starting from 0).
+        It should return an integer representing the new rank.
+
+    Returns
+    -------
+    TT
+        A new TT object with modified ranks according to the provided rule.
+
+    Notes
+    -----
+    This function modifies the ranks of the TT object by performing
+    rank truncation based on SVD. It is used internally by functions like
+    `tt_round` and `tt_retract`.
+    """
     new_cores = [core.copy() for core in tt]
     for pos in range(len(tt) - 1):
         core = new_cores[pos]
@@ -121,6 +327,27 @@ def _tt_modify_ranks(tt: TT, rule: RankRule) -> TT:
 
 
 def tt_round(tt: TT, epsilon: float) -> TT:
+    """
+    Rounds a TT object to a specified accuracy using SVD-based rounding.
+
+    This function reduces the ranks of a Tensor Train object while attempting
+    to maintain a specified accuracy level `epsilon`. It uses an SVD-based
+    rounding procedure where singular values below a threshold are discarded.
+    The threshold is determined based on the desired accuracy `epsilon` and
+    the norm of the TT object.
+
+    Parameters
+    ----------
+    tt : TT
+        Tensor Train object to round.
+    epsilon : float
+        Desired relative accuracy of the rounding.
+
+    Returns
+    -------
+    TT
+        A new TT object with reduced ranks, rounded to the specified accuracy.
+    """
     delta = epsilon / math.sqrt(len(epsilon) - 1) * tt_norm(tt)
 
     def rule(u, s, vh, pos):
@@ -130,6 +357,29 @@ def tt_round(tt: TT, epsilon: float) -> TT:
 
 
 def tt_retract(tt: TT, ranks: list[int]) -> TT:
+    """
+    Retracts (truncates ranks of) a TT object to specified ranks.
+
+    This function explicitly sets the TT-ranks of a Tensor Train object to
+    the provided ranks. It truncates the SVD components of each core to
+    achieve the desired ranks.
+
+    Parameters
+    ----------
+    tt : TT
+        Tensor Train object to retract.
+    ranks : list[int]
+        List of desired TT-ranks. The length of this list should be one
+        greater than the number of cores in the TT object (or the number of
+        dimensions of the represented tensor). The first and last ranks are
+        typically 1.
+
+    Returns
+    -------
+    TT
+        A new TT object with the specified TT-ranks.
+    """
+
     def rule(u, s, vh, pos):
         return ranks[pos + 1]
 
@@ -137,6 +387,24 @@ def tt_retract(tt: TT, ranks: list[int]) -> TT:
 
 
 def canonical_to_tt(cores: list[Float[Array, "r n"]]) -> TT:
+    """
+    Converts a list of canonical factors to Tensor Train cores.
+
+    This function transforms a list of factors from a canonical tensor
+    decomposition into the Tensor Train format. It assumes the input
+    factors are in a specific canonical form suitable for conversion to TT.
+
+    Parameters
+    ----------
+    cores : list[Float[Array, "r n"]]
+        List of canonical factors, where each factor is a jax.numpy.ndarray
+        of shape (r_i, n_i).
+
+    Returns
+    -------
+    TT
+        Tensor Train object representing the tensor in TT format.
+    """
     # new_cores = []
     # new_cores[0] = cores[0][None, ...]
 
