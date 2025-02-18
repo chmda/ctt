@@ -1,5 +1,6 @@
 from typing import Protocol
 
+import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
@@ -27,5 +28,37 @@ def make_fourier(dim: int, domain: tuple[float, float] = (0.0, 1.0)) -> Basis:
 def make_canonical_polynomials(dim: int) -> Basis:
     def _basis(x: float) -> Float[Array, "m"]:
         return x ** jnp.arange(dim)
+
+    return _basis
+
+
+def make_legendre_polynomials(dim: int) -> Basis:
+    def _basis(x: float) -> Float[Array, "m"]:
+        def _recc(carry, n):
+            pn, pnm1 = carry
+            pnp1 = ((2 * n + 1) * x * pn - n * pnm1) / (n + 1)
+            return (pnp1, pn), pnp1
+
+        _, val = jax.lax.scan(_recc, (1.0, 0.0), jnp.arange(0, dim - 1))
+        val = jnp.hstack((1.0, val))
+        normalised_val = val / jnp.sqrt(2.0 / (2.0 * jnp.arange(0, dim) + 1.0))
+        return normalised_val
+
+    return _basis
+
+
+def make_chebyshev_polynomials(dim: int) -> Basis:
+    def _basis(x: float) -> Float[Array, "m"]:
+        def _recc(carry, n):
+            pn, pnm1 = carry
+            pnp1 = 2 * x * pn - pnm1
+            return (pnp1, pn), pnp1
+
+        _, val = jax.lax.scan(_recc, (x, 1.0), jnp.arange(1, dim - 1))
+        val = jnp.hstack((1.0, x, val))
+        normalised_val = val / jnp.sqrt(
+            jnp.hstack((jnp.pi, jnp.full((dim - 1,), jnp.pi / 2.0)))
+        )
+        return normalised_val
 
     return _basis
