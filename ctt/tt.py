@@ -307,21 +307,51 @@ def _tt_modify_ranks(tt: TT, rule: RankRule) -> TT:
     rank truncation based on SVD. It is used internally by functions like
     `tt_round` and `tt_retract`.
     """
-    new_cores = [core.copy() for core in tt]
-    for pos in range(len(tt) - 1):
-        core = new_cores[pos]
-        shape = core.shape
+    # new_cores = [core.copy() for core in tt]
+    # new_cores = [None] * len(tt)
+    # new_cores[0] = tt[0]
+    new_cores = tt_orth_right(tt)
 
+    def _modify_cores(a: TTCore, b: TTCore, pos: int) -> tuple[TTCore, TTCore]:
+        shape = a.shape
         u, s, vh = jnp.linalg.svd(
-            core.reshape(shape[0] * shape[1], shape[2]), full_matrices=False
+            a.reshape(shape[0] * shape[1], shape[2]), full_matrices=False
         )
         new_rank = rule(u, s, vh, pos)
 
         u, s, vh = u[:, :new_rank], s[:new_rank], vh[:new_rank, :]
-        new_cores[pos] = u.reshape((shape[0], shape[1], new_rank))
-        new_cores[pos + 1] = jnp.einsum(
-            "ir,rkl->ikl", s[:, None] * vh, new_cores[pos + 1]
+        core = u.reshape((shape[0], shape[1], new_rank))
+        next_core = jnp.einsum("i,ir,rkl->ikl", s, vh, b)
+        return core, next_core
+
+    for pos in range(len(tt) - 1):
+        new_cores[pos], new_cores[pos + 1] = _modify_cores(
+            new_cores[pos], new_cores[pos + 1], pos
         )
+    # shape = core.shape
+
+    # u, s, vh = jnp.linalg.svd(
+    #     core.reshape(shape[0] * shape[1], shape[2]), full_matrices=False
+    # )
+    # new_rank = rule(u, s, vh, pos)
+
+    # u, s, vh = u[:, :new_rank], s[:new_rank], vh[:new_rank, :]
+    # new_cores[pos] = u.reshape((shape[0], shape[1], new_rank))
+    # new_cores[pos + 1] = jnp.einsum("ir,rkl->ikl", s[:, None] * vh, tt[pos + 1])
+
+    # new_cores = tt_orth_left(tt)
+    # d = len(tt)
+    # for mu in range(d - 1, 0, -1):
+    #     core = new_cores[mu]
+    #     u, s, vh = jnp.linalg.svd(
+    #         core.reshape((core.shape[0], -1)), full_matrices=False
+    #     )
+    #     new_rank = rule(u, s, vh, mu)
+    #     u, s, vh = u[:, :new_rank], s[:new_rank], vh[:new_rank, :]
+    #     u = u @ jnp.diag(s)
+
+    #     new_cores[mu] = vh.reshape((new_rank, core.shape[1], core.shape[2]))
+    #     new_cores[mu - 1] = jnp.einsum("ijk,kl->ijl", new_cores[mu - 1], u)
 
     return new_cores
 
@@ -379,6 +409,7 @@ def tt_retract(tt: TT, ranks: list[int]) -> TT:
     TT
         A new TT object with the specified TT-ranks.
     """
+    ranks = validate_ranks(tt_dims(tt), ranks)
 
     def rule(u, s, vh, pos):
         return ranks[pos + 1]
@@ -457,6 +488,7 @@ def _make_tt(
     key: Optional[PRNGKeyArray] = None,
 ) -> TT:
     assert len(ranks) == len(dims) + 1
+    ranks = validate_ranks(dims, ranks)
     cores = []
     for mu in range(len(dims)):
         shape = (ranks[mu], dims[mu], ranks[mu + 1])
@@ -501,3 +533,81 @@ def tt_zeros(dims: list[int], ranks: list[int]) -> TT:
         return jnp.zeros(shape), None
 
     return _make_tt(dims, ranks, func, None)
+
+
+def validate_ranks(dims: list[int], ranks: list[int]) -> list[int]:
+    return [ranks[0]] + [
+        min(r, min(math.prod(dims[: k + 1]), math.prod(dims[k + 1 :])))
+        for k, r in enumerate(ranks[1:])
+    ]
+
+
+@jax.jit
+def tt_shift_right(a: TTCore, b: TTCore) -> tuple[TTCore, TTCore]:
+    c = jnp.reshape(a, (-1, a.shape[2]))
+    q, r = jnp.linalg.qr(c)
+    comp = jnp.reshape(q, (a.shape[0], a.shape[1], q.shape[1]))
+    comp_next = jnp.einsum("ij,jkl->ikl", r, b)
+    return comp, comp_next
+
+
+@jax.jit
+def tt_shift_left(a: TTCore, b: TTCore) -> tuple[TTCore, TTCore]:
+    c = jnp.reshape(b, (b.shape[0], -1))
+    q, r = jnp.linalg.qr(c.T)
+    qT = q.T
+    comp = jnp.reshape(qT, (qT.shape[0], b.shape[1], b.shape[2]))
+    comp_previous = jnp.einsum("ijk,kl->ijl", a, r.T)
+    return comp_previous, comp
+
+
+@jax.jit
+def tt_orth_right(x: TT) -> TT:
+    d = len(x)
+
+    V = [None] * (d - 1)
+    comp = x[-1]
+    for mu in range(d - 2, -1, -1):
+        comp, v = tt_shift_left(x[mu], comp)
+        V[mu] = v
+    return [comp] + V
+
+
+@jax.jit
+def tt_orth_left(x: TT) -> TT:
+    d = len(x)
+
+    U = [None] * (d - 1)
+    comp = x[0]
+    for mu in range(d - 1):
+        u, comp = tt_shift_right(comp, x[mu + 1])
+        U[mu] = u
+    return U + [comp]
+
+
+def tt_zeros_like(x: TT) -> TT:
+    dims = tt_dims(x)
+    ranks = tt_ranks(x)
+    return tt_zeros(dims, ranks)
+
+
+def tt_orthogonalize(x: TT) -> tuple[TT, TT, TT]:
+    d = len(x)
+    U = [None] * (d - 1)
+    V = [None] * (d - 1)
+    S = [None] * d
+
+    # first compute U_1, ..., U_d-1
+    comp = x[0]
+    for k in range(d - 1):
+        u, comp = tt_shift_right(comp, x[k + 1])
+        U[k] = u
+    # we also get S_d
+    S[-1] = comp
+    # then, compute V_2,...,V_d
+    for k in range(d - 2, -1, -1):
+        comp, v = tt_shift_left(U[k], comp)
+        V[k] = v
+        S[k] = comp
+
+    return U, V, S
