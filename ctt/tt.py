@@ -17,16 +17,25 @@ __all__ = [
     "tt_norm",
     "tt_dot_rank_one",
     "tt_round",
-    "tt_retract",
-    "canonical_to_tt",
+    "tt_truncate",
+    "cp_to_tt",
     "tt_rand",
     "tt_randn",
     "tt_zeros",
     "tt_matvec",
+    "cp_to_tt_retract",
+    "validate_ranks",
+    "tt_shift_right",
+    "tt_shift_left",
+    "tt_orth_right",
+    "tt_zeros_like",
+    "tt_orthogonalize",
+    "tt_orth_left",
 ]
 
 TTCore = Float[Array, "r0 m r1"]
 TT = list[TTCore]
+CP = list[Float[Array, "r n"]]
 
 
 class RankRule(Protocol):
@@ -120,6 +129,13 @@ def tt_mul_scalar(tt: TT, val: float) -> TT:
     return [new_core] + tt[1:]
 
 
+def tt_mul(a: TT, b: TT) -> TT:
+    def _kron(A: TTCore, B: TTCore) -> TTCore:
+        return jax.vmap(jnp.kron, in_axes=1, out_axes=1)(A, B)
+
+    return list(map(_kron, a, b))
+
+
 def tt_add(a: TT, b: TT) -> TT:
     """
     Adds two TT objects together.
@@ -150,19 +166,58 @@ def tt_add(a: TT, b: TT) -> TT:
 
     comps = [jnp.concatenate((a[0], b[0]), axis=2)]
 
-    for mu in range(1, len(a) - 1):
-        c1, c2 = a[mu], b[mu]
-        rp1, _, rpp1 = c1.shape
-        rp2, _, rpp2 = c2.shape
-        data = jnp.zeros((rp1 + rp2, c1.shape[1], rpp1 + rpp2))
-        data = data.at[:rp1, :, :rpp1].set(c1)
-        data = data.at[rp1:, :, rpp1:].set(c2)
-        comps.append(data)
+    def _add_core(a: TTCore, b: TTCore) -> TTCore:
+        rp1, _, rpp1 = a.shape
+        rp2, _, rpp2 = b.shape
+        # data = jnp.zeros((rp1 + rp2, a.shape[1], rpp1 + rpp2))
+        # data = data.at[:rp1, :, :rpp1].set(a)
+        # data = data.at[rp1:, :, rpp1:].set(b)
+        upper = jnp.concatenate(
+            (a, jnp.zeros((a.shape[0], b.shape[1], b.shape[2]))), axis=2
+        )
+        lower = jnp.concatenate(
+            (jnp.zeros((b.shape[0], a.shape[1], a.shape[2])), b), axis=2
+        )
+        data = jnp.concatenate((upper, lower), axis=0)
+        return data
 
-    data = jnp.concatenate((a[-1][:, :, 0], b[-1][:, :, 0]), axis=0)
-    data = data[..., None]
+    # for mu in range(1, len(a) - 1):
+    #     c1, c2 = a[mu], b[mu]
+    #     rp1, _, rpp1 = c1.shape
+    #     rp2, _, rpp2 = c2.shape
+    #     data = jnp.zeros((rp1 + rp2, c1.shape[1], rpp1 + rpp2))
+    #     data = data.at[:rp1, :, :rpp1].set(c1)
+    #     data = data.at[rp1:, :, rpp1:].set(c2)
+    #     comps.append(data)
+    comps += list(map(_add_core, a[1:-1], b[1:-1]))
+
+    # data = jnp.concatenate((a[-1][:, :, 0], b[-1][:, :, 0]), axis=0)
+    # data = data[..., None]
+    data = jnp.concatenate((a[-1], b[-1]), axis=0)
     comps.append(data)
     return comps
+
+
+def tt_fma(a: TT, b: TT, alpha: float) -> TT:
+    """
+    Fused multiply-add operation for tensor trains: :math:`A + \\alpha B`.
+
+    Parameters
+    ----------
+    a : TT
+        First tensor train operand.
+    b : TT
+        Second tensor train operand to be scaled.
+    alpha : float
+        Scalar multiplier for the second tensor train.
+
+    Returns
+    -------
+    TT
+        Result of a + alpha*b as a tensor train.
+    """
+    b = tt_mul_scalar(b, alpha)
+    return tt_add(a, b)
 
 
 def tt_dot(a: TT, b: TT) -> float:
@@ -193,8 +248,13 @@ def tt_dot(a: TT, b: TT) -> float:
     """
     assert len(a) == len(b), "the two TTs must be of the same order"
     res = jnp.einsum("oab,oac->obc", a[0], b[0])
+
+    def _contract(res: TTCore, a: TTCore, b: TTCore) -> TTCore:
+        return jnp.einsum("obc,bnd,cnf->odf", res, a, b)
+
     for i in range(1, len(a)):
-        res = jnp.einsum("obc,bnd,cnf->odf", res, a[i], b[i])
+        # res = jnp.einsum("obc,bnd,cnf->odf", res, a[i], b[i])
+        res = _contract(res, a[i], b[i])
     return jnp.sum(res)
 
 
@@ -215,7 +275,7 @@ def tt_norm(tt: TT) -> float:
     float
         The Frobenius norm of the TT object.
     """
-    return jnp.sqrt(tt_dot(tt, tt))
+    return jnp.sqrt(abs(tt_dot(tt, tt)))
 
 
 def tt_dot_rank_one(a: TT, b: list[Float[Array, "m"]]) -> float:
@@ -268,8 +328,15 @@ def tt_matvec(tt: TT, x: list[Float[Array, "m"]]) -> Float[Array, "r0 rd"]:
         represented as a jax.numpy.ndarray.
     """
     res = jnp.einsum("oab,a->ob", tt[0], x[0])
+
+    def _contract(
+        res: Float[Array, "d m"], core: TTCore, feat: Float[Array, "m"]
+    ) -> Float[Array, "d m"]:
+        return jnp.einsum("ob,bnd,b->od", res, core, feat)
+
     for i in range(1, len(tt)):
-        res = jnp.einsum("ob,bnd,n->od", res, tt[i], x[i])
+        # res = jnp.einsum("ob,bnd,n->od", res, tt[i], x[i])
+        res = _contract(res, tt[i], x[i])
     return res
 
 
@@ -386,7 +453,7 @@ def tt_round(tt: TT, epsilon: float) -> TT:
     return _tt_modify_ranks(tt, rule)
 
 
-def tt_retract(tt: TT, ranks: list[int]) -> TT:
+def tt_truncate(tt: TT, ranks: list[int]) -> TT:
     """
     Retracts (truncates ranks of) a TT object to specified ranks.
 
@@ -417,7 +484,11 @@ def tt_retract(tt: TT, ranks: list[int]) -> TT:
     return _tt_modify_ranks(tt, rule)
 
 
-def canonical_to_tt(cores: list[Float[Array, "r n"]]) -> TT:
+def tt_retract(point: TT, direction: TT, ranks: list[int]) -> TT:
+    return tt_truncate(tt_add(point, direction), ranks)
+
+
+def cp_to_tt(cores: CP) -> TT:
     """
     Converts a list of canonical factors to Tensor Train cores.
 
@@ -474,6 +545,55 @@ def canonical_to_tt(cores: list[Float[Array, "r n"]]) -> TT:
     #     R, N = factor.shape
     #     core = jnp.zeros((R, N, R), dtype=factor.dtype)
     #     tt_cores[mu] = core.at[jnp.arange(R), :, jnp.arange(R)].set(factor)
+
+    return tt_cores
+
+
+def cp_to_tt_retract(factors: CP, ranks: list[int]) -> TT:
+    d = len(factors)
+    assert len(ranks) == d + 1
+
+    # @jax.jit
+    def _factor_to_core(factor: Float[Array, "r n"]) -> Float[Array, "r n r"]:
+        r, n = factor.shape
+        return jax.vmap(jnp.diag, in_axes=1)(factor).transpose(2, 0, 1)
+
+    def _retract_factor(a: TTCore, b: TTCore, rank: int) -> tuple[TTCore, TTCore]:
+        r1, m, r2 = a.shape
+        # compute the SVD of the current core
+        u, s, vh = jnp.linalg.svd(a.reshape(r1 * m, r2), full_matrices=False)
+        # truncate the SVD to project back to the TT manifold
+        u, s, vh = u[:, :rank], s[:rank], vh[:rank, :]
+
+        # replace the TT core
+        return u.reshape((r1, m, rank)), jnp.einsum("ir,rkl->ikl", s[:, None] * vh, b)
+
+    # converting the factors to TT cores and projecting back to the TT manifold
+    tt_cores = [None] * d
+    tt_cores[0] = factors[0].T[None, :, :]
+    for mu in range(d - 1):
+        core = tt_cores[mu]
+        if mu == d - 2:
+            next_core = factors[-1][..., None]
+        else:
+            next_core = _factor_to_core(factors[mu + 1])
+        tt_cores[mu], tt_cores[mu + 1] = _retract_factor(core, next_core, ranks[mu + 1])
+        # r1, m, r2 = core.shape
+
+        # # compute the SVD of the current core
+        # u, s, vh = jnp.linalg.svd(core.reshape(r1 * m, r2), full_matrices=False)
+        # new_rank = ranks[mu + 1]
+        # # truncate the SVD to project back to the TT manifold
+        # u, s, vh = u[:, :new_rank], s[:new_rank], vh[:new_rank, :]
+
+        # # replace the TT core
+        # tt_cores[mu] = u.reshape((r1, m, new_rank))
+        # # update the next core
+        # if mu == d - 2:
+        #     next_core = factors[-1][..., None]
+        # else:
+        #     next_core = _factor_to_core(factors[mu + 1])
+        # tt_cores[mu + 1] = jnp.einsum("ir,rkl->ikl", s[:, None] * vh, next_core)
 
     return tt_cores
 
