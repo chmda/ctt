@@ -41,7 +41,7 @@ def make_legendre_polynomials(dim: int) -> Basis:
 
         _, val = jax.lax.scan(_recc, (1.0, 0.0), jnp.arange(0, dim - 1))
         val = jnp.hstack((1.0, val))
-        normalised_val = val / jnp.sqrt(2.0 / (2.0 * jnp.arange(0, dim) + 1.0))
+        normalised_val = val / jnp.sqrt(1.0 / (2.0 * jnp.arange(0, dim) + 1.0))
         return normalised_val
 
     return _basis

@@ -118,7 +118,7 @@ def mini_batch_pmp(
     terminal_cost: Callable[
         [Float[Array, "B d_lift"], Optional[Float[Array, "B d_o"]]], float
     ],
-    transition: Callable[[Float[Array, "B d_lift"], Control], Float[Array, "B d"]],
+    transition: Callable[[Float[Array, "B d_lift"], Control], Float[Array, "B d_lift"]],
     min_hamiltonian: Callable[
         [Float[Array, "B d_lift"], Float[Array, "B d_lift"], Control], Control
     ],

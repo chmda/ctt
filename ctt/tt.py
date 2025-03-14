@@ -23,7 +23,7 @@ __all__ = [
     "tt_randn",
     "tt_zeros",
     "tt_matvec",
-    "cp_to_tt_retract",
+    "cp_to_tt_truncate",
     "validate_ranks",
     "tt_shift_right",
     "tt_shift_left",
@@ -549,7 +549,7 @@ def cp_to_tt(cores: CP) -> TT:
     return tt_cores
 
 
-def cp_to_tt_retract(factors: CP, ranks: list[int]) -> TT:
+def cp_to_tt_truncate(factors: CP, ranks: list[int]) -> TT:
     d = len(factors)
     assert len(ranks) == d + 1
 
@@ -558,7 +558,7 @@ def cp_to_tt_retract(factors: CP, ranks: list[int]) -> TT:
         r, n = factor.shape
         return jax.vmap(jnp.diag, in_axes=1)(factor).transpose(2, 0, 1)
 
-    def _retract_factor(a: TTCore, b: TTCore, rank: int) -> tuple[TTCore, TTCore]:
+    def _truncate_factor(a: TTCore, b: TTCore, rank: int) -> tuple[TTCore, TTCore]:
         r1, m, r2 = a.shape
         # compute the SVD of the current core
         u, s, vh = jnp.linalg.svd(a.reshape(r1 * m, r2), full_matrices=False)
@@ -577,7 +577,9 @@ def cp_to_tt_retract(factors: CP, ranks: list[int]) -> TT:
             next_core = factors[-1][..., None]
         else:
             next_core = _factor_to_core(factors[mu + 1])
-        tt_cores[mu], tt_cores[mu + 1] = _retract_factor(core, next_core, ranks[mu + 1])
+        tt_cores[mu], tt_cores[mu + 1] = _truncate_factor(
+            core, next_core, ranks[mu + 1]
+        )
         # r1, m, r2 = core.shape
 
         # # compute the SVD of the current core

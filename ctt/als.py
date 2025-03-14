@@ -45,13 +45,13 @@ def _compute_left_right_stack(
 ) -> tuple[tuple[list, list], tuple[list, list]]:
     d = len(tt)
     left_op = [None] * d
-    left_op[0] = jnp.array([1], ndim=3)
+    left_op[0] = jnp.array([1], ndmin=3)
     left_rhs = [None] * d
-    left_rhs[0] = jnp.array([1], ndim=2)
+    left_rhs[0] = jnp.array([1], ndmin=2)
     right_op = [None] * d
-    right_op[-1] = jnp.array([1], ndim=3)
+    right_op[-1] = jnp.array([1], ndmin=3)
     right_rhs = [None] * d
-    right_rhs[-1] = jnp.array([1], ndim=2)
+    right_rhs[-1] = jnp.array([1], ndmin=2)
     for k in range(len(tt) - 1, 0, -1):
         right_op[k - 1] = jnp.einsum(
             "abc,dec,gbie,kid->kga", jnp.conj(tt[k]), right_op[k], A[k], tt[k]
