@@ -52,7 +52,7 @@ def _compute_left_right_stack(
     right_op[-1] = jnp.array([1], ndmin=3)
     right_rhs = [None] * d
     right_rhs[-1] = jnp.array([1], ndmin=2)
-    for k in range(len(tt) - 1, 0, -1):
+    for k in range(d - 1, 0, -1):
         right_op[k - 1] = jnp.einsum(
             "abc,dec,gbie,kid->kga", jnp.conj(tt[k]), right_op[k], A[k], tt[k]
         )
@@ -157,7 +157,7 @@ def als(
 
         iters += 1
         stag = _compute_stagnation(x0, guess)
-        jax.debug.print("iters={iters}, stag={stag}", iters=iters, stag=stag)
+        # jax.debug.print("iters={iters}, stag={stag}", iters=iters, stag=stag)
 
         return iters, stag, guess
 

@@ -332,7 +332,7 @@ def tt_matvec(tt: TT, x: list[Float[Array, "m"]]) -> Float[Array, "r0 rd"]:
     def _contract(
         res: Float[Array, "d m"], core: TTCore, feat: Float[Array, "m"]
     ) -> Float[Array, "d m"]:
-        return jnp.einsum("ob,bnd,b->od", res, core, feat)
+        return jnp.einsum("ob,bnd,n->od", res, core, feat)
 
     for i in range(1, len(tt)):
         # res = jnp.einsum("ob,bnd,n->od", res, tt[i], x[i])
@@ -552,6 +552,7 @@ def cp_to_tt(cores: CP) -> TT:
 def cp_to_tt_truncate(factors: CP, ranks: list[int]) -> TT:
     d = len(factors)
     assert len(ranks) == d + 1
+    ranks = validate_ranks([factors[k].shape[1] for k in range(d)], ranks)
 
     # @jax.jit
     def _factor_to_core(factor: Float[Array, "r n"]) -> Float[Array, "r n r"]:
@@ -568,18 +569,96 @@ def cp_to_tt_truncate(factors: CP, ranks: list[int]) -> TT:
         # replace the TT core
         return u.reshape((r1, m, rank)), jnp.einsum("ir,rkl->ikl", s[:, None] * vh, b)
 
-    # converting the factors to TT cores and projecting back to the TT manifold
+    # converting the factors to TT cores and right-orthogonalize
     tt_cores = [None] * d
-    tt_cores[0] = factors[0].T[None, :, :]
+    tt_cores[-1] = factors[-1][..., None]
+    for mu in range(d - 1, 0, -1):
+        core = tt_cores[mu]
+        if mu == 1:
+            previous_core = factors[0].T[None, ...]
+        else:
+            previous_core = _factor_to_core(factors[mu - 1])
+
+        unfolded = jnp.reshape(core, (core.shape[0], -1))
+        q, r = jnp.linalg.qr(unfolded.T)
+        qT = q.T
+        comp = jnp.reshape(qT, (qT.shape[0], core.shape[1], core.shape[2]))
+        comp_previous = jnp.einsum("ijk,kl->ijl", previous_core, r.T)
+
+        tt_cores[mu] = comp
+        tt_cores[mu - 1] = comp_previous
+
+    # truncate the cores
     for mu in range(d - 1):
         core = tt_cores[mu]
-        if mu == d - 2:
-            next_core = factors[-1][..., None]
-        else:
-            next_core = _factor_to_core(factors[mu + 1])
+        next_core = tt_cores[mu + 1]
         tt_cores[mu], tt_cores[mu + 1] = _truncate_factor(
             core, next_core, ranks[mu + 1]
         )
+        # r1, m, r2 = core.shape
+
+        # # compute the SVD of the current core
+        # u, s, vh = jnp.linalg.svd(core.reshape(r1 * m, r2), full_matrices=False)
+        # new_rank = ranks[mu + 1]
+        # # truncate the SVD to project back to the TT manifold
+        # u, s, vh = u[:, :new_rank], s[:new_rank], vh[:new_rank, :]
+
+        # # replace the TT core
+        # tt_cores[mu] = u.reshape((r1, m, new_rank))
+        # # update the next core
+        # if mu == d - 2:
+        #     next_core = factors[-1][..., None]
+        # else:
+        #     next_core = _factor_to_core(factors[mu + 1])
+        # tt_cores[mu + 1] = jnp.einsum("ir,rkl->ikl", s[:, None] * vh, next_core)
+
+    return tt_cores
+
+
+def cp_to_tt_rounding(factors: CP, epsilon: float) -> TT:
+    d = len(factors)
+    delta = epsilon * cp_norm(factors) / math.sqrt(d - 1)
+
+    # @jax.jit
+    def _factor_to_core(factor: Float[Array, "r n"]) -> Float[Array, "r n r"]:
+        return jax.vmap(jnp.diag, in_axes=1)(factor).transpose(2, 0, 1)
+
+    def _round_factor(a: TTCore, b: TTCore) -> tuple[TTCore, TTCore]:
+        r1, m, r2 = a.shape
+        # compute the SVD of the current core
+        u, s, vh = jnp.linalg.svd(a.reshape(r1 * m, r2), full_matrices=False)
+        cumsum = jnp.sqrt(jnp.cumsum(s[::-1] ** 2))
+        rank = max(s.shape[0] - jnp.sum(jnp.sqrt(cumsum) <= delta), 1)
+        # truncate the SVD to project back to the TT manifold
+        u, s, vh = u[:, :rank], s[:rank], vh[:rank, :]
+
+        # replace the TT core
+        return u.reshape((r1, m, rank)), jnp.einsum("ir,rkl->ikl", s[:, None] * vh, b)
+
+    # converting the factors to TT cores and right-orthogonalize
+    tt_cores = [None] * d
+    tt_cores[-1] = factors[-1][..., None]
+    for mu in range(d - 1, 0, -1):
+        core = tt_cores[mu]
+        if mu == 1:
+            previous_core = factors[0].T[None, ...]
+        else:
+            previous_core = _factor_to_core(factors[mu - 1])
+
+        unfolded = jnp.reshape(core, (core.shape[0], -1))
+        q, r = jnp.linalg.qr(unfolded.T)
+        qT = q.T
+        comp = jnp.reshape(qT, (qT.shape[0], core.shape[1], core.shape[2]))
+        comp_previous = jnp.einsum("ijk,kl->ijl", previous_core, r.T)
+
+        tt_cores[mu] = comp
+        tt_cores[mu - 1] = comp_previous
+
+    # round the cores
+    for mu in range(d - 1):
+        core = tt_cores[mu]
+        next_core = tt_cores[mu + 1]
+        tt_cores[mu], tt_cores[mu + 1] = _round_factor(core, next_core)
         # r1, m, r2 = core.shape
 
         # # compute the SVD of the current core
@@ -733,3 +812,14 @@ def tt_orthogonalize(x: TT) -> tuple[TT, TT, TT]:
         S[k] = comp
 
     return U, V, S
+
+
+def cp_norm(cp: CP) -> float:
+    R = cp[0].shape[0]
+
+    result = jnp.ones((R, R))
+    for factor in cp:
+        gram = jnp.dot(factor, factor.T)
+        result *= gram
+
+    return jnp.sqrt(jnp.sum(result))

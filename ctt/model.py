@@ -11,8 +11,13 @@ class CTT(Protocol):
     def __call__(self, tts: list[TT], x: Float[Array, "d"]) -> Float[Array, "d_o"]: ...
 
 
+def _eval_bases(bases: list[Basis], x: Float[Array, "d"]) -> list[Float[Array, "m"]]:
+    return list(map(lambda b, y: b(y), bases, x))
+
+
 def _ftt(bases: list[Basis], x: Float[Array, "d"], tt: TT) -> Float[Array, "d"]:
-    features = [bases[i](x[i]) for i in range(x.shape[0])]  # (m,)*d
+    # features = [bases[i](x[i]) for i in range(x.shape[0])]  # (m,)*d
+    features = _eval_bases(bases, x)
     result = tt_matvec(tt, features)  # (d, 1)
     return result[:, 0]
 

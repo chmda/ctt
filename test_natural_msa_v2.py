@@ -15,7 +15,7 @@ from ctt.model import make_ctt
 from ctt.optimizer import mini_batch_pmp
 from ctt.tt import (
     TT,
-    cp_to_tt_rounding,
+    cp_to_tt_truncate,
     tt_add,
     tt_matvec,
     tt_mul_scalar,
@@ -26,11 +26,11 @@ from ctt.tt import (
     tt_zeros_like,
     validate_ranks,
 )
-from ctt.tto import TTO, cpo_to_tto_rounding
+from ctt.tto import TTO, cpo_to_tto_truncate
 
 jax.config.update("jax_enable_x64", True)
 
-d = 2
+d = 1
 n_features = 2
 basis = make_canonical_polynomials(dim=n_features)
 # basis = make_legendre_polynomials(dim=n_features)
@@ -42,7 +42,8 @@ key = random.PRNGKey(42)
 
 
 def lift(x: Float[Array, "d"]) -> Float[Array, "m"]:
-    return jnp.hstack((0, x))
+    return jnp.hstack((1.0, x))
+    # return x
 
 
 def retraction(x: Float[Array, "m"]) -> Float[Array, "o"]:
@@ -67,14 +68,15 @@ target_ctt = make_ctt(lift, retraction, basis, d)
 
 @jax.jit
 def target(x: Float[Array, "d"]) -> Float[Array, "m"]:
-    # val = jnp.exp(-jnp.sum(x**2)/2)
-    # val = 1./(2. + jnp.prod(x))
-    val = jnp.mean(x**2)
+    val = jnp.exp(-jnp.sum(x**2) / 2)
+    # val = 1.0 / (2.0 + jnp.prod(x))
+    # val = jnp.mean(x**2)
     # val = jnp.sum(jnp.sin(2*jnp.pi*x))
-    # val = jnp.prod((x >= 0.)*1.)
+    # val = jnp.prod((x >= 0.0) * 1.0)
     # val = jnp.mean(jnp.exp(x))
     # val = jnp.exp(jnp.sum(x))
     # val = target_ctt(target_tts, x)
+    # val = jnp.log(1.0 + jnp.sum(x**2))
     return jnp.atleast_1d(val)
 
 
@@ -97,9 +99,6 @@ def ctt(tts: list[TT], x: Float[Array, "d"]) -> Float[Array, "d"]:
     x = lift(x)
     val = jax.lax.fori_loop(0, len(tts), _body_fn, x)
     val = retraction(val)
-    # val = x
-    # for control in tts:
-    #     val = val + _ftt(val, control)
     return val
 
 
@@ -110,17 +109,15 @@ N_train = 1_000_000
 X_train = random.uniform(
     key=train_key, shape=(N_train, d), minval=domain[0], maxval=domain[1]
 )
-# X_train = random.normal(key=train_key, shape=(N_train, d))
 y_train = jax.vmap(target)(X_train)
 
 N_val = 2000
 X_val = random.uniform(
     key=val_key, shape=(N_val, d), minval=domain[0], maxval=domain[1]
 )
-# X_val = random.normal(key=val_key, shape=(N_val, d))
 y_val = jax.vmap(target)(X_val)
 
-num_steps = 3
+num_steps = 4
 radius = None
 ranks = [d_lift] + [2] * (d_lift - 1) + [1]
 ranks = validate_ranks([n_features] * d_lift, ranks)
@@ -155,10 +152,8 @@ def regularization(
     xk: Float[Array, "d_lift"], control: TT, coefficient: float
 ) -> float:
     feats = _eval_bases(xk)
-    # contracted = jax.vmap(tt_matvec, in_axes=(None, 0))(control, feats)  # (B, d, 1)
     contracted = tt_matvec(control, feats)  # (d, 1)
     return 0.5 * coefficient * jnp.sum(contracted[:, 0] ** 2)
-    # return 0.5 * coefficient * tt_norm(control) ** 2
 
 
 def terminal_cost(xT: Float[Array, "d_lift"], y: Float[Array, "d_o"]) -> float:
@@ -177,13 +172,9 @@ def _build_gram_op(features: list[Float[Array, "B m"]], ranks: list[int]) -> TTO
     G = jax.tree.map(jax.vmap(jnp.outer), features, features)
     cpo = [jnp.tile(jnp.eye(d), (B, 1, 1))] + G  # (B, d, d) + (B, m, m)*d
     # convert the CPO to TTO
-    # tt_op = cpo_to_tto_truncate(cpo, ranks)  # we have a d+1-order tensor operator now
-    tt_op = cpo_to_tto_rounding(cpo, 1e-6)
-    jax.debug.print(
-        "gram_op_ranks={ranks}, given ranks={r}",
-        ranks=[1] + [core.shape[-1] for core in tt_op],
-        r=ranks,
-    )
+    tt_op = cpo_to_tto_truncate(
+        cpo, [1] + ranks
+    )  # we have a d+1-order tensor operator now
     return tt_op
 
 
@@ -197,14 +188,13 @@ def _build_rhs(
     first_factor = -costates
     rhs = [first_factor] + features
     # convert the CP to TT
-    # tt = cp_to_tt_truncate(rhs, ranks)
-    tt = cp_to_tt_rounding(rhs, 1e-6)
-    jax.debug.print(
-        "rhs_op_ranks={ranks}, given ranks={r}",
-        ranks=[1] + [core.shape[-1] for core in tt],
-        r=ranks,
-    )
+    tt = cp_to_tt_truncate(rhs, [1] + ranks)
     return tt
+
+
+def _lr_schedule(lr: float, k: int) -> float:
+    return lr
+    # return lr * (k + 1) ** (-0.1)
 
 
 def _get_update(
@@ -217,10 +207,10 @@ def _get_update(
     k: int,
 ) -> TT:
     # build the TT operator
-    gram_op = _build_gram_op(features, None)
+    gram_op = _build_gram_op(features, ranks)
 
     # build RHS
-    rhs = _build_rhs(features, costates, None)
+    rhs = _build_rhs(features, costates, ranks)
     # rhs = tt_orth_right(rhs)
 
     iters, stag, sol = als(
@@ -237,11 +227,12 @@ def _get_update(
 
     # alpha = R/(gamma + R)
     alpha = coefficient / (gamma + coefficient)
-    # alpha *= 1 / (k + 1) ** 1
+    alpha = _lr_schedule(alpha, k)
     tt = tt_add(
         tt_mul_scalar(control, 1.0 - alpha),
         tt_mul_scalar(sol, alpha / coefficient),
     )
+    # tt = tt_add(control, tt_mul_scalar(sol, alpha / coefficient))
     tt = tt_truncate(tt, ranks)
     return tt
 
@@ -258,87 +249,8 @@ def min_hamiltonian(
 ) -> TT:
     features = jax.vmap(_eval_bases)(states)
 
-    d = states.shape[1]
-    # tmp_control = [jnp.eye(d)[None, ...]] + control
-    # tmp_control = tt_orth_right(tmp_control)
-    # new_ranks = tt_ranks(tmp_control)
-
-    # build the TT operator
-    # gram_op = _build_gram_op(features, new_ranks)
-
-    # # build RHS
-    # rhs = _build_rhs(features, costates, new_ranks)
-    # rhs = tt_orth_right(rhs)
-
-    # iters, stag, sol = als(
-    #     A=gram_op,
-    #     b=rhs,
-    #     x0=tt_zeros_like(rhs),
-    #     # x0=tmp_control,
-    #     max_iters=100,
-    #     stagnation=1e-8,
-    #     l2_regularization=1e-10,
-    # )
-    # tmp = tto_contract_tt(gram_op, sol)
-
-    # jax.debug.print(
-    #     "error={error}, residual={residual}",
-    #     error=tt_norm(sol) ** 2
-    #     + tt_norm(tmp_control) ** 2
-    #     - 2 * tt_dot(sol, tmp_control),
-    #     residual=tt_norm(tmp) ** 2 + tt_norm(rhs) ** 2 - 2 * tt_dot(tmp, rhs),
-    # )
-    # # 'sol' is a d+1-order tensor, so we contract the two first cores to replace it by a d-order tensor
-    # # compute the optimal alpha
-    # # A = tt_add(tt_mul_scalar(sol, 1 / coefficient), tt_mul_scalar(tmp_control, -1.0))
-    # # Gpsi = tto_contract_tt(gram_op, tmp_control)
-    # # Gsol = tto_contract_tt(gram_op, sol)
-    # # top = tt_dot(tt_add(tt_mul_scalar(Gpsi, coefficient), tt_mul_scalar(rhs, -1.0)), A)
-    # # bottom = tt_dot(
-    # #     tt_add(tt_mul_scalar(Gpsi, coefficient), tt_mul_scalar(Gsol, -1.0)), A
-    # # )
-    # # alpha = top / bottom
-    # core = jnp.einsum("abc,cde->bde", sol[0], sol[1])
-    # sol = [core] + sol[2:]
-
-    # # def _f(alpha: float) -> float:
-    # #     alpha = alpha[0]
-    # #     new_tt = tt_add(
-    # #         tt_mul_scalar(control, 1.0 - alpha), tt_mul_scalar(sol, alpha / coefficient)
-    # #     )
-    # #     contracted = jax.vmap(tt_matvec, in_axes=(None, 0))(
-    # #         new_tt, features
-    # #     )  # (B, d, 1)
-    # #     H = (
-    # #         0.5 * coefficient * jnp.sum(contracted**2) / states.shape[0]
-    # #         + jnp.sum(costates * contracted[..., 0]) / states.shape[0]
-    # #     )
-    # #     return H
-
-    # # result = jax.scipy.optimize.minimize(fun=_f, x0=jnp.ones(1), method="BFGS")
-    # # gamma = jax.lax.cond(result.success, lambda x: x, lambda x: gamma, result.x[0])
-    # # jax.debug.print(
-    # #     "sucess={success}, gamma={gamma}", success=result.success, gamma=gamma
-    # # )
-
-    # if gamma is not None:
-    #     # alpha = R/(gamma + R)
-    #     alpha = coefficient / (gamma + coefficient)
-    #     tt = tt_add(
-    #         tt_mul_scalar(control, 1.0 - alpha),
-    #         tt_mul_scalar(sol, alpha / coefficient),
-    #     )
-    #     # tt = tt_mul_scalar(tt, 1.0 / (coefficient + gamma))
-    #     # tt = tt_add(control, tt_mul_scalar(sol, gamma))
-    #     # tt = tt_truncate(tt, ranks)
-    # else:
-    #     tt = tt_mul_scalar(sol, 1.0 / coefficient)
-
-    # tt = tt_truncate(tt, ranks)
-    out_type = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), control)
-    tt = jax.pure_callback(
-        _get_update, out_type, features, costates, control, gamma, coefficient, ranks, k
-    )
+    squared_ranks = ranks[:1] + list(map(lambda x: x**2, ranks[1:]))
+    tt = _get_update(features, costates, control, gamma, coefficient, squared_ranks, k)
 
     if radius:
         # project the TT to the closed ball of radius `radius`
@@ -403,43 +315,47 @@ def pmp(
 key, *control_keys = random.split(key, num_steps + 1)
 
 init_controls = [
-    tt_randn(control_key, [n_features] * d_lift, ranks, cov=3.0)
+    tt_randn(control_key, [n_features] * d_lift, ranks, cov=0.1)
     for control_key in control_keys
 ]
 zero_init_controls = [tt_zeros([n_features] * d_lift, ranks) for _ in range(num_steps)]
 print("Init controls norm:", list(map(tt_norm, init_controls)))
 
 key, training_key = random.split(key)
-key, *perturbation_keys = random.split(key, 1 + num_steps)
+# key, *perturbation_keys = random.split(key, 1 + num_steps)
 
 
-def _perturb_tt(tt: TT, key: PRNGKeyArray) -> TT:
-    perturbed = []
-    for i in range(len(tt)):
-        key, perturbation_key = random.split(key)
-        core = tt[i]
-        perturbed.append(
-            core + 1e-5 * random.normal(key=perturbation_key, shape=core.shape)
-        )
-    return perturbed
+# def _perturb_tt(tt: TT, key: PRNGKeyArray) -> TT:
+#     perturbed = []
+#     for i in range(len(tt)):
+#         key, perturbation_key = random.split(key)
+#         core = tt[i]
+#         perturbed.append(
+#             core + 1e-5 * random.normal(key=perturbation_key, shape=core.shape)
+#         )
+#     return perturbed
 
 
-perturbated_target_tts = list(
-    map(
-        _perturb_tt,
-        target_tts,
-        perturbation_keys,
-    )
-)
-
+# perturbated_target_tts = list(
+#     map(
+#         _perturb_tt,
+#         target_tts,
+#         perturbation_keys,
+#     )
+# )
+gamma = 1000
+R = 1e-15
+print("Alpha =", R / (gamma + R))
+print("Learning rate =", 1.0 / (gamma + R))
+# TODO: use linesearch for alpha
 params_pmp, (train_losses_pmp, val_losses_pmp) = pmp(
     train_dataset=(X_train, y_train),
     val_dataset=(X_val, y_val),
-    params=init_controls,
-    opt_steps=1000,
-    regularization_coeff=1e-15,
+    params=zero_init_controls,
+    opt_steps=20000,
+    regularization_coeff=R,
     radius=None,
-    gamma=9e1,
+    gamma=gamma,
     training_key=training_key,
     batch_size=128,
 )
