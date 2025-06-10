@@ -23,6 +23,7 @@ from ctt.tt import (
     tt_dims,
     tt_matvec,
     tt_mul_scalar,
+    tt_orth_right,
     tt_ranks,
     tt_truncate,
     tt_zeros_like,
@@ -316,9 +317,8 @@ def natural_msa(
         control = controls[idx]
         ranks = tt_ranks(control)
         squared_ranks = ranks[:1] + list(map(lambda x: x**2, ranks[1:]))
-        # squared_ranks = validate_ranks(tt_dims(control), squared_ranks)
+        squared_ranks = validate_ranks(tt_dims(control), squared_ranks)
         # build the TT operator
-        # gram_op = _build_gram_op(features, squared_ranks)
         gram_op = _build_gram_op(features, squared_ranks)
 
         # build RHS
@@ -326,7 +326,7 @@ def natural_msa(
         rhs = _build_rhs(
             features, costates, validate_ranks(tt_dims(control), squared_ranks)
         )
-        # rhs = tt_orth_right(rhs)
+        rhs = tt_orth_right(rhs)
 
         iters, stag, sol = als(
             A=gram_op,
@@ -363,23 +363,9 @@ def natural_msa(
             )
 
         # find the learning rates that ensure descent
-        # def _objective(alpha: Float[Array, "L"]) -> float:
-        #     new_controls = []
-        #     for i, lr in enumerate(alpha):
-        #         tt = tt_add(
-        #             tt_mul_scalar(controls[i], 1.0 - lr * R),
-        #             tt_mul_scalar(updates[i], lr),
-        #         )
-        #         tt = tt_truncate(tt, tt_ranks(controls[i]))
-        #         new_controls.append(tt)
-
-        #     states = _solve_state(new_controls, x0)
-        #     loss = jax.vmap(terminal_cost)(states[-1, :], yN)
-        #     return jnp.mean(loss)
         def _objective(alpha: Float[Array, "L"]) -> float:
-            lr = alpha[0]
             new_controls = []
-            for i in range(len(controls)):
+            for i, lr in enumerate(alpha):
                 tt = tt_add(
                     tt_mul_scalar(controls[i], 1.0 - lr * R),
                     tt_mul_scalar(updates[i], lr),
@@ -391,20 +377,38 @@ def natural_msa(
             loss = jax.vmap(terminal_cost)(states[-1, :], yN)
             return jnp.mean(loss)
 
+        # def _objective(alpha: Float[Array, "L"]) -> float:
+        #     lr = alpha[0]
+        #     new_controls = []
+        #     for i in range(len(controls)):
+        #         tt = tt_add(
+        #             tt_mul_scalar(controls[i], 1.0 - lr * R),
+        #             tt_mul_scalar(updates[i], lr),
+        #         )
+        #         tt = tt_truncate(tt, tt_ranks(controls[i]))
+        #         new_controls.append(tt)
+
+        #     states = _solve_state(new_controls, x0)
+        #     loss = jax.vmap(terminal_cost)(states[-1, :], yN)
+        #     return jnp.mean(loss)
+
         # result = jax.scipy.optimize.minimize(
         #     _objective,
-        #     x0=jnp.asarray([step_size] * len(controls)),
+        #     x0=jnp.asarray([1e-2] * len(controls)),
         #     method="BFGS",
-        #     options=dict(maxiter=2000, line_search_maxiter=10),
         # )
         # learning_rates = result.x
         # alpha = step_size * (state.iterations + 1) ** (-0.5)
         alpha = step_size
         learning_rates = [alpha] * len(controls)
+        # solver = jaxopt.BFGS(fun=_objective, maxiter=500, jit=False)
+        # res = solver.run([1e-4])
+        # alpha = res.params[0]
+        # learning_rates = [alpha] * len(controls)
         # jax.debug.print(
         #     "Learning rates: {lr} | Iter: {iter}",
         #     lr=learning_rates,
-        #     iter=result.nit,
+        #     iter=res.state.iter_num,
         # )
         for i, lr in enumerate(learning_rates):
             tt = tt_add(

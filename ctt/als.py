@@ -23,7 +23,8 @@ def _solve_core(
     l2_regularization: Optional[float] = None,
 ) -> Float[Array, "r0*row*r1"]:
     if l2_regularization is None:
-        return jnp.linalg.lstsq(A, b)[0]
+        # return jnp.linalg.lstsq(A, b)[0]
+        return jnp.linalg.solve(A, b)
     else:
         AT = A.T
         return jnp.linalg.solve(
@@ -45,13 +46,13 @@ def _compute_left_right_stack(
 ) -> tuple[tuple[list, list], tuple[list, list]]:
     d = len(tt)
     left_op = [None] * d
-    left_op[0] = jnp.array([1], ndmin=3)
+    left_op[0] = jnp.ones((1, 1, 1))
     left_rhs = [None] * d
-    left_rhs[0] = jnp.array([1], ndmin=2)
+    left_rhs[0] = jnp.ones((1, 1))
     right_op = [None] * d
-    right_op[-1] = jnp.array([1], ndmin=3)
+    right_op[-1] = jnp.ones((1, 1, 1))  # (rk, rk_op, rk)
     right_rhs = [None] * d
-    right_rhs[-1] = jnp.array([1], ndmin=2)
+    right_rhs[-1] = jnp.ones((1, 1))  # (rk, rk)
     for k in range(d - 1, 0, -1):
         right_op[k - 1] = jnp.einsum(
             "abc,dec,gbie,kid->kga", jnp.conj(tt[k]), right_op[k], A[k], tt[k]
@@ -110,7 +111,7 @@ def als(
         # forward sweep
         for mu in range(0, d - 1):
             # build micro operator
-            micro_op = _construct_micro_op(left_op[mu], right_op[mu], A[mu], b[mu])
+            micro_op = _construct_micro_op(left_op[mu], right_op[mu], A[mu], guess[mu])
             # build micro rhs
             micro_rhs = _construct_micro_rhs(left_rhs[mu], right_rhs[mu], b[mu])
 
@@ -125,15 +126,15 @@ def als(
                 guess[mu],
                 A[mu],
                 jnp.conj(guess[mu]),
-            )
+            )  # (rank[k], rank_op[k], rank[k])
             left_rhs[mu + 1] = jnp.einsum(
                 "ab,acd,bce->de", left_rhs[mu], b[mu], jnp.conj(guess[mu])
-            )
+            )  # (rank_sol[k], rank[k])
 
         # backward sweep
         for mu in range(d - 1, -1, -1):
             # build micro operator
-            micro_op = _construct_micro_op(left_op[mu], right_op[mu], A[mu], b[mu])
+            micro_op = _construct_micro_op(left_op[mu], right_op[mu], A[mu], guess[mu])
             # build micro rhs
             micro_rhs = _construct_micro_rhs(left_rhs[mu], right_rhs[mu], b[mu])
             core = _solve_core(micro_op, micro_rhs, l2_regularization=l2_regularization)
@@ -148,10 +149,10 @@ def als(
                     right_op[mu],
                     A[mu],
                     guess[mu],
-                )
+                )  # (rank[k], rank_op[k], rank[k])
                 right_rhs[mu - 1] = jnp.einsum(
                     "abc,dc,ebd->ea", jnp.conj(guess[mu]), right_rhs[mu], b[mu]
-                )
+                )  # (rank_sol[k], rank[k])
             else:
                 guess[mu] = core
 

@@ -1,3 +1,7 @@
+import datetime
+import os
+import pickle
+
 import jax
 import jax.experimental
 import jax.numpy as jnp
@@ -30,7 +34,8 @@ basis = make_canonical_polynomials(dim=n_features)
 # alpha = 1e-1
 # soft_relu = lambda x: alpha*jax.nn.softplus(x/alpha)
 # basis = lambda x: jnp.asarray([1.0, jax.nn.relu(x)])
-key = random.PRNGKey(42)
+SEED = 42
+key = random.PRNGKey(SEED)
 
 key, cov_key = random.split(key)
 Sigma = random.normal(key=cov_key, shape=(d, d))
@@ -38,8 +43,8 @@ Sigma = Sigma @ Sigma.T / d
 
 
 def lift(x: Float[Array, "d"]) -> Float[Array, "m"]:
-    return jnp.hstack((jnp.zeros((1,)), x))
-    # return x
+    # return jnp.hstack((jnp.zeros((1,)), x))
+    return x
 
 
 def retraction(x: Float[Array, "m"]) -> Float[Array, "o"]:
@@ -61,36 +66,29 @@ target_tts = [
 ]
 target_ctt = make_ctt(lift, retraction, basis, d)
 
+TARGET_FUNCTION = "bivariate"
+
 
 @jax.jit
 def target(x: Float[Array, "d"]) -> Float[Array, "m"]:
-    # val = jnp.exp(-jnp.sum(x**2) / 2)
-    # val = 1.0 / (2.0 + jnp.prod(x))
-    # val = jnp.mean(x**2)
-    # val = jnp.sum(jnp.sin(2*jnp.pi*x))
-    # val = jnp.prod((x >= 0.0) * 1.0)
-    # val = jnp.mean(jnp.exp(x))
-    # val = jnp.exp(jnp.sum(x))
-    # val = target_ctt(target_tts, x)
-    # val = jnp.log(1.0 + jnp.sum(x**2))
-    # val = jax.scipy.stats.multivariate_normal.pdf(
-    #     x=x, mean=jnp.zeros_like(x), cov=Sigma
-    # )
-    # A = jnp.array(
-    #     [
-    #         [jnp.cos(jnp.pi / 4), -jnp.sin(jnp.pi / 4)],
-    #         [jnp.sin(jnp.pi / 4), jnp.cos(jnp.pi / 4)],
-    #     ]
-    # )
-    # y = A @ x
-    # val = jnp.exp(-jnp.sum(y**2) / 10)
-    # Henon-Heiles potential
-    # val = (
-    #     0.5 * jnp.sum(x**2)
-    #     + 0.2 * jnp.sum(x[:-1] * x[1:] ** 2 - x[:-1] ** 3)
-    #     + 0.2**2 / 16 * jnp.sum((x[:-1] ** 2 + x[1:] ** 2) ** 2)
-    # )
-    val = jnp.mean((x[::2] + x[1::2]) ** 2)
+    if TARGET_FUNCTION == "standard-gaussian":
+        val = jnp.exp(-jnp.sum(x**2) / 2)
+    elif TARGET_FUNCTION == "heaviside":
+        val = jnp.prod((x >= 0.0) * 1.0)
+    elif TARGET_FUNCTION == "recovery":
+        val = target_ctt(target_tts, x)
+    elif TARGET_FUNCTION == "gaussian":
+        val = jax.scipy.stats.multivariate_normal.pdf(
+            x=x, mean=jnp.zeros_like(x), cov=Sigma
+        )
+    elif TARGET_FUNCTION == "henon-heiles":
+        val = (
+            0.5 * jnp.sum(x**2)
+            + 0.2 * jnp.sum(x[:-1] * x[1:] ** 2 - x[:-1] ** 3)
+            + 0.2**2 / 16 * jnp.sum((x[:-1] ** 2 + x[1:] ** 2) ** 2)
+        )
+    elif TARGET_FUNCTION == "bivariate":
+        val = jnp.mean((x[::2] + x[1::2]) ** 2)
     return jnp.atleast_1d(val)
 
 
@@ -119,13 +117,13 @@ def ctt(tts: list[TT], x: Float[Array, "d"]) -> Float[Array, "d"]:
 key, train_key, val_key = random.split(key, 3)
 
 domain = (0.0, 1.0)
-N_train = 2_000_000
+N_train = 1_000_000
 X_train = random.uniform(
     key=train_key, shape=(N_train, d), minval=domain[0], maxval=domain[1]
 )
 y_train = jax.vmap(target)(X_train)
 
-N_val = 2000
+N_val = 5000
 X_val = random.uniform(
     key=val_key, shape=(N_val, d), minval=domain[0], maxval=domain[1]
 )
@@ -147,7 +145,7 @@ def dataloader(arrays: list, batch_size: int, *, key: PRNGKeyArray):
         (key,) = random.split(key, 1)
         start = 0
         end = batch_size
-        while end < dataset_size:
+        while end <= dataset_size:
             batch_perm = perm[start:end]
             yield tuple(array[batch_perm] for array in arrays)
             start = end
@@ -173,6 +171,9 @@ def transition(xk: Float[Array, "d_lift"], control: TT) -> Float[Array, "d_lift"
     return xk + psi
 
 
+STEP_SIZE = 1e-3
+
+
 def pmp(
     train_dataset: tuple[Float[Array, "B d"], Float[Array, "B d_o"]],
     val_dataset: tuple[Float[Array, "B d"], Float[Array, "B d_o"]],
@@ -191,7 +192,7 @@ def pmp(
         terminal_cost=terminal_cost,
         transition=transition,
         bases=bases,
-        step_size=1e-3,
+        step_size=STEP_SIZE,
     )
     optimizer = jax.jit(optimizer)
 
@@ -231,16 +232,19 @@ print("Init controls norm:", list(map(tt_norm, init_controls)))
 
 key, training_key = random.split(key)
 
-R = 1e-12
+R = 1e-10
+
+OPT_STEPS = 20_000
+BATCH_SIZE = 256
 
 params_pmp, (train_losses_pmp, val_losses_pmp) = pmp(
     train_dataset=(X_train, y_train),
     val_dataset=(X_val, y_val),
     params=zero_init_controls,
-    opt_steps=10_000,
+    opt_steps=OPT_STEPS,
     regularization_coeff=R,
     training_key=training_key,
-    batch_size=256,
+    batch_size=BATCH_SIZE,
 )
 
 fig, ax = plt.subplots()
@@ -249,14 +253,33 @@ y_val_norm = jnp.mean(optax.l2_loss(y_val))
 
 # plot PMP losses
 val_losses_pmp = jnp.asarray(val_losses_pmp)
+val_rel_l2 = jnp.sqrt(val_losses_pmp / y_val_norm)
+
+# save data to a file
+filename = (
+    f"{datetime.datetime.now():%Y%m%d-%H%M%S}-{TARGET_FUNCTION}-D{d}-F{n_features}.npz"
+)
+data = {
+    "seed": SEED,
+    "dim": d,
+    "n_features": n_features,
+    "num_steps": num_steps,
+    "ranks": ranks,
+    "reg_coeff": R,
+    "steps": OPT_STEPS,
+    "batch_size": BATCH_SIZE,
+    "rel_l2": val_rel_l2,
+    "solution": params_pmp,
+}
+with open(os.path.join("checkpoints", filename), "wb+") as f:
+    pickle.dump(data, f)
 
 ax.semilogy(
     jnp.arange(len(val_losses_pmp)),
-    jnp.sqrt(val_losses_pmp / y_val_norm),
-    label="Relative L2 (PMP)",
+    val_rel_l2,
+    label="Relative L2",
     color="blue",
 )
-# ax.semilogy(jnp.arange(len(val_losses_pmp)), jnp.sqrt(val_losses_pmp), label="Absolute L2", color="blue", linestyle="dashed")
 
 ax.grid()
 ax.legend()
