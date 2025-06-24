@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import jax.scipy.optimize
 from jaxtyping import Array, Float
 
-from ctt.als import als
+from ctt.als import als_linear_system
 from ctt.bases import Basis
 from ctt.tt import (
     TT,
@@ -328,7 +328,7 @@ def natural_msa(
         )
         rhs = tt_orth_right(rhs)
 
-        iters, stag, sol = als(
+        iters, stag, sol = als_linear_system(
             A=gram_op,
             b=rhs,
             x0=tt_zeros_like(rhs),

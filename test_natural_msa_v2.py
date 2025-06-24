@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import optax
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from ctt.als import als
+from ctt.als import als_linear_system
 from ctt.bases import make_canonical_polynomials
 from ctt.model import make_ctt
 from ctt.optimizer import mini_batch_pmp
@@ -213,7 +213,7 @@ def _get_update(
     rhs = _build_rhs(features, costates, ranks)
     # rhs = tt_orth_right(rhs)
 
-    iters, stag, sol = als(
+    iters, stag, sol = als_linear_system(
         A=gram_op,
         b=rhs,
         x0=tt_zeros_like(rhs),
