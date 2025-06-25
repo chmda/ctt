@@ -219,7 +219,7 @@ def als_ls_vector(
     max_iters: int = 30,
     stagnation: float = 1e-5,
     l2_regularization: Optional[float] = None,
-) -> tuple[int, float, TT]:
+) -> tuple[int, float, float, TT]:
     """
     Solve a least-squares problem using Alternating Least Squares (ALS) for vector-valued tensor trains.
 
@@ -261,6 +261,9 @@ def als_ls_vector(
     stagnation : float
         Final stagnation value (relative difference between two successive tensor estimates).
 
+    residual : float
+        Sum of squared weighted residual.
+
     guess : TT
         The optimized tensor in TT format that approximates the least-squares solution.
 
@@ -288,6 +291,8 @@ def als_ls_vector(
 
     if weights is None:
         weights = jnp.ones((B,))
+
+    weights = weights / jnp.sum(weights)
     sqrt_weights = jnp.sqrt(weights)
 
     # we flatten sqrt(w)*b into the shape (B*d_o,)
@@ -322,12 +327,12 @@ def als_ls_vector(
             )  # NOTE: we access the `k+1`-th index because A has an additional dimension
         return left, right
 
-    def _cond(val: tuple[int, float, TT]) -> bool:
-        iters, stag, _ = val
+    def _cond(val: tuple[int, float, float, TT]) -> bool:
+        iters, stag, _, _ = val
         return (iters < max_iters) & (stag > stagnation)
 
-    def _body(val: tuple[int, float, TT]) -> tuple[int, float, TT]:
-        iters, stag, x0 = val
+    def _body(val: tuple[int, float, float, TT]) -> tuple[int, float, float, TT]:
+        iters, stag, residual, x0 = val
         guess = tt_orth_right(x0)  # right-orthonormalize components
 
         left, right = _compute_left_right_stack(guess, A)
@@ -351,7 +356,9 @@ def als_ls_vector(
                 weighted_b,
                 l2_regularization=l2_regularization,
             )
+            residual = jnp.sum((weighted_features @ core - weighted_b) ** 2)
             core = jnp.reshape(core, guess[mu].shape)
+
             # orthogonalize
             guess[mu], guess[mu + 1] = tt_shift_right(core, guess[mu + 1])
             # update 'left'
@@ -375,7 +382,9 @@ def als_ls_vector(
                 weighted_b,
                 l2_regularization=l2_regularization,
             )
+            residual = jnp.sum((weighted_features @ core - weighted_b) ** 2)
             core = jnp.reshape(core, guess[mu].shape)
+
             # orthogonalize
             if mu > 0:
                 guess[mu - 1], guess[mu] = tt_shift_left(guess[mu - 1], core)
@@ -386,9 +395,16 @@ def als_ls_vector(
 
         iters += 1
         stag = _compute_stagnation(x0, guess)
-        # jax.debug.print("iters={iters}, stag={stag}", iters=iters, stag=stag)
+        # jax.debug.print(
+        #     "iters={iters}, stag={stag}, relative l2={l2}",
+        #     iters=iters,
+        #     stag=stag,
+        #     l2=jnp.sqrt(residual / jnp.sum(weighted_b**2)),
+        # )
 
-        return iters, stag, guess
+        return iters, stag, residual, guess
 
-    iters, stag, guess = jax.lax.while_loop(_cond, _body, init_val=(0, jnp.inf, x0))
-    return iters, stag, guess
+    iters, stag, residual, guess = jax.lax.while_loop(
+        _cond, _body, init_val=(0, jnp.inf, jnp.inf, x0)
+    )
+    return iters, stag, residual, guess
