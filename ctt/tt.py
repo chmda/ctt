@@ -1,4 +1,5 @@
 import math
+from functools import reduce
 from typing import Callable, Optional, Protocol
 
 import jax
@@ -823,3 +824,11 @@ def cp_norm(cp: CP) -> float:
         result *= gram
 
     return jnp.sqrt(jnp.sum(result))
+
+
+def tt_to_full(tt: TT) -> Float[Array, "..."]:
+    def _contract(a: Float[Array, "..."], b: TTCore) -> Float[Array, "..."]:
+        return jnp.tensordot(a, b, axes=((-1,), (0,)))
+
+    tensor = reduce(_contract, tt)
+    return tensor[..., 0]  # the last rank is 1

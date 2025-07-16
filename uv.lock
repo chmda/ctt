@@ -233,6 +233,7 @@ dependencies = [
     { name = "lineax" },
     { name = "matplotlib" },
     { name = "optax" },
+    { name = "setuptools" },
     { name = "tqdm" },
 ]
 
@@ -251,6 +252,7 @@ requires-dist = [
     { name = "lineax", specifier = ">=0.0.7" },
     { name = "matplotlib", specifier = ">=3.9.4" },
     { name = "optax", specifier = ">=0.2.4" },
+    { name = "setuptools", specifier = ">=75.8.0" },
     { name = "tqdm", specifier = ">=4.67.1" },
 ]
 

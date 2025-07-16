@@ -219,6 +219,7 @@ def als_ls_vector(
     max_iters: int = 30,
     stagnation: float = 1e-5,
     l2_regularization: Optional[float] = None,
+    cutoff: Optional[float] = None,
 ) -> tuple[int, float, float, TT]:
     """
     Solve a least-squares problem using Alternating Least Squares (ALS) for vector-valued tensor trains.
@@ -252,6 +253,9 @@ def als_ls_vector(
 
     l2_regularization : Optional[float], optional
         If provided, L2 regularization is applied to the least-squares solution for each TT core.
+
+    cutoff : float, optional
+        If provided, cut the singular values :math:`\sigma_k` such that :math:`\sigma_k < \varepsilon \sigma_0`.
 
     Returns
     -------
@@ -305,7 +309,7 @@ def als_ls_vector(
         l2_regularization: Optional[float] = None,
     ) -> Float[Array, "p"]:
         if l2_regularization is None:
-            sol = jnp.linalg.lstsq(A, b)[0]
+            sol = jnp.linalg.lstsq(A, b, rcond=cutoff)[0]
         else:
             AT = A.T
             sol = jnp.linalg.solve(

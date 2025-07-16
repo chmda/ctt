@@ -3,7 +3,8 @@ from typing import Any, Callable, Literal, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+import jax.random as random
+from jaxtyping import Array, Float, PRNGKeyArray
 
 from ctt.als import als_linear_system, als_ls_vector
 from ctt.bases import Basis
@@ -13,11 +14,14 @@ from ctt.tt import (
     TT,
     cp_to_tt_truncate,
     tt_add,
+    tt_dims,
     tt_dot,
     tt_mul_scalar,
+    tt_randn,
     tt_ranks,
     tt_truncate,
     tt_zeros_like,
+    validate_ranks,
 )
 from ctt.tto import cpo_to_tto_truncate
 
@@ -225,9 +229,11 @@ def ctt_natural_grad(
         return natural_grads
 
     def _compute_natural_grad(
+        key: PRNGKeyArray,
         params: list[TT],
         X: Float[Array, "B d"],
         weights: Optional[Float[Array, "B"]] = None,
+        l2_regularization: Optional[float] = None,
         **extra_args: dict[str, Any],
     ) -> list[TT]:
         B, d = X.shape
@@ -244,27 +250,42 @@ def ctt_natural_grad(
         grad_losses = grad_loss_(outputs)  # (B, d_o)
 
         def _natural_grad(
+            subkey: PRNGKeyArray,
             tt: TT,
             jac: Float[Array, "B d_o d_lift"],
             u_k: Float[Array, "B d_lift"],
             grad: Float[Array, "B d_o"],
         ) -> TT:
             du_dthetak = [jac] + jax.vmap(_eval_bases, in_axes=(None, 0))(bases, u_k)
+            ranks = tt_ranks(tt)
+            dims = tt_dims(tt)
+            twice_ranks = [ranks[0]] + list(map(lambda x: 2 * x, ranks[1:]))
+            twice_ranks = validate_ranks(dims, twice_ranks)
+            init_tt = tt_randn(subkey, dims, twice_ranks)
 
             # solve the least-squares problem \sum_j ||<d u^j/d theta_k, d> - ∇L(u)(x)_j||^2
+            # NOTE: in our case, the natural metric g_\theta is exactly the metric on H,
+            # because D^2H = Id
             iterations, stag, residual, dir = als_ls_vector(
                 du_dthetak,
                 grad,
-                tt_zeros_like(tt),
+                init_tt,
                 weights=weights,
-                max_iters=30,
-                stagnation=1e-8,  # NOTE: change that
-                l2_regularization=1e-8,  # NOTE: remove that
+                max_iters=50,
+                stagnation=1e-8,
+                l2_regularization=l2_regularization,
+                # cutoff=1e-5,
             )
+            # iterations, stag, dir = riemannian_ls(
+            #     du_dthetak, grad, tt, weights=weights, max_iters=50, rtol=1e-5
+            # )
+
             return dir
 
+        subkeys = random.split(key, num=L)
         natural_grads = [
             _natural_grad(
+                subkeys[i],
                 params[i],
                 jacobians[:, i, :, :],
                 intermediate_values[:, i, :],
@@ -342,6 +363,9 @@ def ctt_linesearch(
         grad_fn: Callable[..., list[TT]],
         **extra_args: dict[str, Any],
     ) -> tuple[list[TT], LinesearchState]:
+        # TODO: we should instead for a function that computes the slope <d_k, \nabla f(x_k)>
+        # because the way we are doing right now requires the gradient to be in the TT format
+        # whereas we have shown that it is in the CP format.
         slope = _compute_slope(updates, grad)
 
         class _LoopState(NamedTuple):
