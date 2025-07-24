@@ -369,7 +369,7 @@ def als_ls_vector(
             left[mu + 1] = jnp.einsum("bdi,ijk,bj->bdk", L, guess[mu], M)
 
         # backward sweep
-        for mu in range(d - 1, -1, -1):
+        for mu in range(order - 1, -1, -1):
             # solve for the new core
             L = left[mu]
             M = A[mu + 1]
@@ -412,3 +412,6 @@ def als_ls_vector(
         _cond, _body, init_val=(0, jnp.inf, jnp.inf, x0)
     )
     return iters, stag, residual, guess
+
+
+# TODO: MALS

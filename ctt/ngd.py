@@ -6,13 +6,12 @@ import jax.numpy as jnp
 import jax.random as random
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from ctt.als import als_linear_system, als_ls_vector
 from ctt.bases import Basis
 from ctt.model import _eval_bases, _ftt
+from ctt.solvers import als_ls_vector
 from ctt.tt import (
     CP,
     TT,
-    cp_to_tt_truncate,
     tt_add,
     tt_dims,
     tt_dot,
@@ -20,10 +19,8 @@ from ctt.tt import (
     tt_randn,
     tt_ranks,
     tt_truncate,
-    tt_zeros_like,
     validate_ranks,
 )
-from ctt.tto import cpo_to_tto_truncate
 
 
 def ctt_natural_grad(
@@ -63,15 +60,24 @@ def ctt_natural_grad(
         X = lift(x)  # (d_lift,)
 
         # computes the intermediates values u_k(x) = f_k o ... o f_1 o L(x)
-        def _fwd(
-            carry: Float[Array, "d_lift"], k: int
-        ) -> tuple[Float[Array, "d_lift"], Float[Array, "d_lift"]]:
-            u = jax.lax.switch(k, [lambda u=u: u for u in params])
-            y = carry + _ftt(bases, carry, u)
-            return y, y
+        # def _fwd(
+        #     carry: Float[Array, "d_lift"], k: int
+        # ) -> tuple[Float[Array, "d_lift"], Float[Array, "d_lift"]]:
+        #     u = jax.lax.switch(k, [lambda u=u: u for u in params])
+        #     y = carry + _ftt(bases, carry, u)
+        #     return y, y
 
-        _, dynamics = jax.lax.scan(_fwd, X, jnp.arange(len(params)))  # (L, d_lift)
-        dynamics = jnp.concatenate([X[None], dynamics], axis=0)  # (L+1, d_lift)
+        # _, dynamics = jax.lax.scan(_fwd, X, jnp.arange(len(params)))  # (L, d_lift)
+        # dynamics = jnp.concatenate([X[None], dynamics], axis=0)  # (L+1, d_lift)
+        def _layer(x: Float[Array, "d"], params: TT) -> Float[Array, "d"]:
+            return x + _ftt(bases, x, params)
+
+        dynamics = [X]
+        h = X
+        for k in range(len(params)):
+            h = _layer(h, params[k])
+            dynamics.append(h)
+        dynamics = jnp.stack(dynamics, axis=0)
 
         # computes the Jacobian du/du_k
         jacobians = []
@@ -85,7 +91,7 @@ def ctt_natural_grad(
                     h = h + _ftt(bases, h, u)
                 return retraction(h)
 
-            J = jax.jacfwd(u_k)(dynamics[k])  # (d_o, d_lift)
+            J = jax.jacrev(u_k)(dynamics[k])  # (d_o, d_lift)
             jacobians.append(J)
 
         # we have that `jacobians[k] = du/dx^{k+1}`
@@ -99,7 +105,7 @@ def ctt_natural_grad(
         intermediate_values: Optional[Float[Array, "B L+1 d_lift"]] = None,
         jacobians: Optional[Float[Array, "B L d_o d_lift"]] = None,
         **extra_args: Any,
-    ) -> list[TT]:
+    ) -> list[CP]:
         if intermediate_values is None or jacobians is None:
             intermediate_values, jacobians = jax.vmap(
                 _compute_jacobians, in_axes=(None, 0)
@@ -122,7 +128,7 @@ def ctt_natural_grad(
 
         def _compute_tensor_grad(
             tensor: TT, jac: Float[Array, "B d_o d_lift"], u_k: Float[Array, "B d_lift"]
-        ) -> TT:
+        ) -> CP:
             # we have ∇_{\theta_k} L(u) = \int <∇L(u)(x), du/d\theta_k(x)> d\mu(x) \in R^{d_lift x n x ... x n}
             # so we have first to contract ∇L(u)(x) with the leg of du/d\theta_k that corresponds to `d_o`
             first_leg = jax.vmap(jnp.matmul)(grad_losses, jac)  # (B, d_lift)
@@ -138,11 +144,11 @@ def ctt_natural_grad(
             # the ranks of the TT are however high (`B`), so we have to do truncation or rounding.
             # the best method would be `rounding`, however, due to JAX, the output ranks will not be predictable.
             # therefore, we decide to use `truncation`, where the ranks are the same as `tensor`.
-            ranks = tt_ranks(tensor)
-            ranks.insert(0, 1)
-            # ranks = [1] + ranks[1:]
-            grad = cp_to_tt_truncate(factors, ranks)
-            return grad
+            # ranks = tt_ranks(tensor)
+            # ranks.insert(0, 1)
+            # # ranks = [1] + ranks[1:]
+            # grad = cp_to_tt_truncate(factors, ranks)
+            return factors
 
         grads = [
             _compute_tensor_grad(
@@ -151,82 +157,6 @@ def ctt_natural_grad(
             for i in range(L)
         ]
         return grads
-
-    def _compute_natural_grad_old(
-        params: list[TT],
-        X: Float[Array, "B d"],
-        weights: Optional[Float[Array, "B"]] = None,
-        **extra_args: dict[str, Any],
-    ) -> list[TT]:
-        B, d = X.shape
-        L = len(params)
-        if weights is None:
-            weights = jnp.ones((B,))
-
-        intermediate_values, jacobians = jax.vmap(
-            _compute_jacobians, in_axes=(None, 0)
-        )(params, X)
-        grads = _compute_functional_grad(
-            params,
-            X,
-            weights=weights,
-            intermediate_values=intermediate_values,
-            jacobians=jacobians,
-            **extra_args,
-        )
-
-        def _compute_gram(
-            tt: TT, jac: Float[Array, "B d_o d_lift"], u_k: Float[Array, "B d_lift"]
-        ) -> TT:
-            def _compute_rank_one_tensor(
-                J: Float[Array, "d_o d_lift"], h: Float[Array, "d_lift"]
-            ) -> CP:
-                # the first leg is J.T @ J
-                first_leg = J.T @ J  # (d_lift, d_lift)
-                # the second leg is (\phi^1(h_1) \phi^1(h_1)^T) ⊗ ... ⊗ (\phi^d(h_d)\phi^d(h_d)^T)
-                phi = _eval_bases(bases, h)  # (m,)*d_lift
-                tmp = jax.tree.map(jnp.outer, phi, phi)  # (m, m)*d_lift
-                return [first_leg] + tmp
-
-            factors = jax.vmap(_compute_rank_one_tensor)(jac, u_k)
-            ranks = tt_ranks(tt)
-            ranks.insert(0, 1)
-            # ranks = [1] + ranks[1:]
-
-            # the Gram operator is converted to the TT format using truncation, as explained above.
-            gram = cpo_to_tto_truncate(factors, ranks)
-            return gram
-
-        def _natural_grad(
-            tt: TT,
-            jac: Float[Array, "B d_o d_lift"],
-            u_k: Float[Array, "B d_lift"],
-            grad: TT,
-        ) -> TT:
-            # compute the tensor operator that corresponds to the Gram matrix
-            op = _compute_gram(tt, jac, u_k)
-
-            # TODO: change to solving least-squares problem
-            # solve the linear system G @ d = b
-            iterations, stag, dir = als_linear_system(
-                op,
-                grad,
-                tt_zeros_like(grad),
-                max_iters=30,
-                stagnation=1e-8,  # NOTE: change that
-                l2_regularization=1e-10,  # NOTE: remove that
-            )
-            # `dir` is of order d_lift+1, we contract the first two cores to have a vector output TT of order d_lift
-            dir = [jnp.einsum("ijk,kmn->jmn", dir[0], dir[1])] + dir[2:]
-            return dir
-
-        natural_grads = [
-            _natural_grad(
-                params[i], jacobians[:, i, :, :], intermediate_values[:, i, :], grads[i]
-            )
-            for i in range(L)
-        ]
-        return natural_grads
 
     def _compute_natural_grad(
         key: PRNGKeyArray,
@@ -271,7 +201,7 @@ def ctt_natural_grad(
                 grad,
                 init_tt,
                 weights=weights,
-                max_iters=50,
+                max_iters=100,
                 stagnation=1e-8,
                 l2_regularization=l2_regularization,
                 # cutoff=1e-5,
@@ -356,17 +286,19 @@ def ctt_linesearch(
         updates: list[TT],
         state: LinesearchState,
         params: list[TT],
+        slope_fn: Callable[[list[TT], list[TT]], float],
         *,
         value: float,
-        grad: list[TT],
         value_fn: Callable[..., Union[Array, float]],
-        grad_fn: Callable[..., list[TT]],
         **extra_args: dict[str, Any],
     ) -> tuple[list[TT], LinesearchState]:
         # TODO: we should instead for a function that computes the slope <d_k, \nabla f(x_k)>
         # because the way we are doing right now requires the gradient to be in the TT format
         # whereas we have shown that it is in the CP format.
-        slope = _compute_slope(updates, grad)
+        # slope = _compute_slope(updates, grad)
+        slope = slope_fn(
+            updates, params
+        )  # computes <d_k, \nabla f(x_k)>, where d_k is the direction
 
         class _LoopState(NamedTuple):
             learning_rate: Union[float, Array]
@@ -391,13 +323,16 @@ def ctt_linesearch(
             new_params = ctt_apply_updates(params, new_updates)
 
             value_fn_ = partial(value_fn, **extra_args)
-            grad_fn_ = partial(grad_fn, **extra_args)
+            # grad_fn_ = partial(grad_fn, **extra_args)
 
             new_value = value_fn_(new_params)
-            new_grads = None
+            # new_grads = None
             if condition == "strong-wolfe" or condition == "wolfe":
-                new_grads = grad_fn_(new_params)
-                new_slope = _compute_slope(updates, new_grads)
+                # new_grads = grad_fn_(new_params)
+                # new_slope = _compute_slope(updates, new_grads)
+                new_slope = slope_fn(
+                    updates, new_params
+                )  # computes <d_k, \nabla f(x_k + \alpha_k d_k)>
 
             # Armijo condition (upper bound on admissible step size)
             # f(x+alpha*d) <= (1+delta)f(x) + c_1 alpha <d, df(x)> + eps

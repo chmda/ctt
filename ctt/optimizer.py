@@ -14,8 +14,8 @@ import jax.numpy as jnp
 import jax.scipy.optimize
 from jaxtyping import Array, Float
 
-from ctt.als import als_linear_system
 from ctt.bases import Basis
+from ctt.solvers import als_linear_system
 from ctt.tt import (
     TT,
     cp_to_tt_truncate,

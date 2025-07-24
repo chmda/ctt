@@ -9,10 +9,10 @@ import matplotlib.pyplot as plt
 import optax
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from ctt.als import als_linear_system
 from ctt.bases import make_canonical_polynomials
 from ctt.model import make_ctt
 from ctt.optimizer import mini_batch_pmp
+from ctt.solvers import als_linear_system
 from ctt.tt import (
     TT,
     cp_to_tt_rounding,

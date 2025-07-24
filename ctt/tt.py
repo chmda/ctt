@@ -446,7 +446,7 @@ def tt_round(tt: TT, epsilon: float) -> TT:
     TT
         A new TT object with reduced ranks, rounded to the specified accuracy.
     """
-    delta = epsilon / math.sqrt(len(epsilon) - 1) * tt_norm(tt)
+    delta = epsilon / math.sqrt(len(tt) - 1) * tt_norm(tt)
 
     def rule(u, s, vh, pos):
         return max(jnp.sum(s > delta).item(), 1)
@@ -721,10 +721,12 @@ def tt_randn(
     mean: float = 0.0,
     cov: float = 1.0,
 ) -> TT:
+    scale = cov ** (1 / len(dims))
+
     def func(shape, key):
         key, sample_key = random.split(key)
-        return mean + cov * random.normal(key=sample_key, shape=shape) / jnp.prod(
-            jnp.asarray(shape)
+        return mean + scale * random.normal(key=sample_key, shape=shape) / jnp.sqrt(
+            shape[0] * shape[2]
         ), key
 
     return _make_tt(dims, ranks, func, key)
@@ -831,4 +833,149 @@ def tt_to_full(tt: TT) -> Float[Array, "..."]:
         return jnp.tensordot(a, b, axes=((-1,), (0,)))
 
     tensor = reduce(_contract, tt)
-    return tensor[..., 0]  # the last rank is 1
+    tensor = tensor[..., 0]  # the last rank is 1
+    if tensor.shape[0] == 1:
+        return tensor[0, ...]
+    return tensor
+
+
+def tt_cp_dot(a: TT, b: CP) -> float:
+    """
+    Compute the inner product between a Tensor Train (TT) tensor and a
+    Canonical Polyadic (CP) tensor.
+
+    This function contracts a TT-format tensor `a` with a CP-format tensor `b`.
+    It supports both standard tensors and vector-valued tensors.
+
+    Parameters
+    ----------
+    a : TT
+        The TT-tensor represented as a list of 3D cores. Each core has shape
+        ``(r_k, n_k, r_{k+1})`` where ``r_k`` and ``r_{k+1}`` are TT-ranks. For a vector-valued TT,
+        the first rank should be the dimension of output.
+    b : CP
+        The CP-tensor represented as a list of factor matrices. Each factor matrix
+        ``b[i]`` has shape ``(R, n_i)``, where `R` is the CP-rank. For a vector-valued CP,
+        the length of `b` will be ``len(a) + 1``.
+
+    Returns
+    -------
+    float
+        The inner product ``<a, b>`` between the TT-tensor `a` and the CP-tensor `b`.
+    """
+    if len(b) == len(a) + 1:
+        # then `b` is a vector-valued CP, and `a` is a vector-valued TT
+        res = jnp.einsum("ijk,ri->rjk", a[0], b[0])
+        res = jnp.einsum("rjk,rj->rk", res, b[1])
+        for i in range(1, len(a)):
+            res = jnp.einsum("rk,kmj,rm->rj", res, a[i], b[i + 1])
+        return jnp.sum(res)
+    else:
+        res = jnp.einsum("ijk,rj->rik", a[0], b[0])
+        for i in range(1, len(a)):
+            res = jnp.einsum("rij,jmn,rm->rin", res, a[i], b[i])
+        return jnp.sum(res)
+
+
+def full_to_tt_truncate(
+    tensor: Float[Array, "..."], ranks: list[int]
+) -> tuple[TT, float]:
+    """
+    Convert a full tensor into a Tensor Train (TT) with given `ranks`.
+
+    This function applies successive singular value decompositions (SVD)
+    along each dimension of the input tensor to produce a TT-format
+    representation with specified TT-ranks.
+
+    Parameters
+    ----------
+    tensor : Float[Array, "..."]
+        The input full tensor to be decomposed. It should have shape
+        ``(n_1, n_2, ..., n_d)``.
+    ranks : list of int
+        The list of TT-ranks, of length ``d+1``, where ``d`` is the
+        number of dimensions of `tensor`. The first and last elements
+        must be 1 (i.e., ``ranks[0] = ranks[-1] = 1``).
+
+    Returns
+    -------
+    cores : list of ndarray
+        A list of TT-cores. Each core is a 3D array of shape
+        ``(r_k, n_k, r_{k+1})``, where ``r_k`` and ``r_{k+1}`` are
+        consecutive TT-ranks, and ``n_k`` is the size of the k-th mode.
+    error : float
+        A priori upper-bound of the Frobenius norm of the truncation error ``||tensor - TT||_F``.
+    """
+    shape = tensor.shape
+    d = len(shape)
+
+    cores = []
+    curr_tensor = tensor
+    # a priori upper bound of ||A-B||_F
+    err2 = 0.0
+    for k in range(d - 1):
+        n_k = shape[k]
+        r_k = ranks[k]
+        r_kp1 = ranks[k + 1]
+        # Reshape to (r_k * n_k, -1)
+        curr_tensor = curr_tensor.reshape((r_k * n_k, -1))
+        # SVD
+        U, S, Vh = jnp.linalg.svd(curr_tensor, full_matrices=False)
+        # Truncate to r_{k+1}
+        err2 += jnp.sum(S[r_kp1:] ** 2)  # bound for the error
+        U = U[:, :r_kp1]
+        S = S[:r_kp1]
+        Vh = Vh[:r_kp1, :]
+        # Form the core
+        core = U.reshape((r_k, n_k, r_kp1))
+        cores.append(core)
+        # Prepare for next step
+        # curr_tensor = jnp.dot(jnp.diag(S), Vh)
+        curr_tensor = jnp.einsum("i,ij->ij", S, Vh)
+    # Last core
+    n_d = shape[-1]
+    r_d = ranks[-2]
+    r_dp1 = ranks[-1]
+    core = curr_tensor.reshape((r_d, n_d, r_dp1))
+    cores.append(core)
+
+    return cores, jnp.sqrt(err2)
+
+
+def full_to_tt_rounding(
+    tensor: Float[Array, "..."], epsilon: float
+) -> tuple[TT, float]:
+    delta = epsilon / math.sqrt(len(tensor) - 1) * jnp.linalg.norm(tensor)
+
+    shape = tensor.shape
+    d = len(shape)
+
+    cores = []
+    curr_tensor = tensor
+    # a priori upper bound of ||A-B||_F
+    err2 = 0.0
+    r = 1
+    for k in range(d - 1):
+        n_k = shape[k]
+        # Reshape to (r_k * n_k, -1)
+        curr_tensor = curr_tensor.reshape((r * n_k, -1))
+        # SVD
+        U, S, Vh = jnp.linalg.svd(curr_tensor, full_matrices=False)
+        rp1 = max(jnp.sum(S > delta).item(), 1)
+        # Truncate to r_{k+1}
+        err2 += jnp.sum(S[rp1:] ** 2)  # bound for the error
+        U = U[:, :rp1]
+        S = S[:rp1]
+        Vh = Vh[:rp1, :]
+        # Form the core
+        core = U.reshape((r, n_k, rp1))
+        cores.append(core)
+        # Prepare for next step
+        curr_tensor = jnp.einsum("i,ij->ij", S, Vh)
+        r = rp1
+    # Last core
+    n_d = shape[-1]
+    core = curr_tensor.reshape((r, n_d, -1))
+    cores.append(core)
+
+    return cores, jnp.sqrt(err2)
