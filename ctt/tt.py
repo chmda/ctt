@@ -908,6 +908,7 @@ def full_to_tt_truncate(
     """
     shape = tensor.shape
     d = len(shape)
+    ranks = validate_ranks(shape, ranks)
 
     cores = []
     curr_tensor = tensor
