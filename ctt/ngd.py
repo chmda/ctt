@@ -16,6 +16,7 @@ from ctt.tt import (
     tt_dims,
     tt_dot,
     tt_mul_scalar,
+    tt_orth_right,
     tt_randn,
     tt_ranks,
     tt_truncate,
@@ -249,7 +250,51 @@ def ctt_apply_updates(x: list[TT], y: list[TT]) -> list[TT]:
         u = tt_add(x, y)
         return tt_truncate(u, ranks)
 
-    return list(map(_update, x, y))
+    # fused TT-add+truncate
+    def _update_fused(a: TT, b: TT) -> TT:
+        # ranks to preserve from the original
+        target_ranks = tt_ranks(a)
+        target_ranks = validate_ranks(tt_dims(a), target_ranks)
+
+        # orthogonalize to the right for stable SVD truncation
+        cores = tt_orth_right(a)
+        updates = tt_orth_right(b)
+
+        new_cores = []
+
+        # first core
+        core0 = jnp.concatenate((cores[0], updates[0]), axis=2)
+        new_cores.append(core0)
+
+        # middle cores: block structure addition + local svd truncation
+        cur = core0
+        for pos, (c1, c2) in enumerate(zip(cores[1:-1], updates[1:-1]), start=1):
+            # build block core inline
+            upper = jnp.concatenate(
+                (c1, jnp.zeros((c1.shape[0], c2.shape[1], c2.shape[2]))), axis=2
+            )
+            lower = jnp.concatenate(
+                (jnp.zeros((c2.shape[0], c1.shape[1], c1.shape[2])), c2), axis=2
+            )
+            block = jnp.concatenate((upper, lower), axis=0)
+
+            # truncate this block
+            shape = cur.shape
+            u, s, vh = jnp.linalg.svd(
+                cur.reshape(shape[0] * shape[1], shape[2]), full_matrices=False
+            )
+            r_new = target_ranks[pos]
+            u, s, vh = u[:, :r_new], s[:r_new], vh[:r_new, :]
+            new_cores[-1] = u.reshape((shape[0], shape[1], r_new))
+            cur = jnp.einsum("i,ir,rkl->ikl", s, vh, block)
+            new_cores.append(cur)
+        # last core
+        last = jnp.concatenate((cores[-1], updates[-1]), axis=0)
+        new_cores.append(last)
+        return new_cores
+
+    # return list(map(_update, x, y))
+    return list(map(_update_fused, x, y))
 
 
 class LinesearchState(NamedTuple):
