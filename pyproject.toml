@@ -22,4 +22,7 @@ dependencies = [
 ignore = ["F722", "F821"]
 
 [dependency-groups]
-dev = ["ipython>=8.18.1"]
+dev = [
+    "ipython>=8.18.1",
+    "line-profiler>=5.0.0",
+]

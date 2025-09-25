@@ -1,0 +1,121 @@
+[[experiment]]
+name = "henon-heiles"
+seed = 42
+dim = 3
+n_features = 2
+domain = [-1, 1]
+num_train = 512
+num_test = 512
+num_layers = 4
+# rank = 2
+[[experiment.optimizer]]
+name = "ngd"
+num_iterations = 10_000
+learning_rate = "line_search"
+damping_coeff = 1e-4
+adaptive_damping_coeff = false
+[[experiment.optimizer]]
+name = "adam"
+num_iterations = 10_000
+learning_rate = "line_search"
+[[experiment.optimizer]]
+name = "bfgs"
+num_iterations = 10_000
+learning_rate = "line_search"
+
+[[experiment]]
+name = "toy"
+seed = 42
+dim = 4
+n_features = 2
+domain = [-1, 1]
+num_train = 1024
+num_test = 256
+num_layers = 2
+# rank = 2
+[[experiment.optimizer]]
+name = "ngd"
+num_iterations = 10_000
+learning_rate = 4e-1
+# damping_coeff = 5e-6
+damping_coeff = 1e-5
+adaptive_damping_coeff = false
+[[experiment.optimizer]]
+name = "adam"
+num_iterations = 10_000
+learning_rate = "line_search"
+[[experiment.optimizer]]
+name = "bfgs"
+num_iterations = 10_000
+learning_rate = "line_search"
+
+[[experiment]]
+name = "sos"
+seed = 42
+dim = 5
+n_features = 2
+# domain = [-1, 1]
+domain = [0, 1]
+num_train = 2048
+num_test = 512
+num_layers = 2
+# rank = 2
+# d_lift = 4
+[[experiment.optimizer]]
+name = "ngd"
+num_iterations = 10_000
+learning_rate = 0.5     # 0.5 -> 2e-6
+# learning_rate = "line_search"
+damping_coeff = 1e-11          # 1e-11 -> 2e-6
+adaptive_damping_coeff = false
+[[experiment.optimizer]]
+name = "adam"
+num_iterations = 10_000
+learning_rate = "line_search"
+[[experiment.optimizer]]
+name = "lbfgs"
+num_iterations = 10_000
+learning_rate = "line_search"
+# d=3
+# num_train = 2048
+# num_iterations = 1000
+# learning_rate = "line_search"
+# damping_coeff = 1e-9
+# num_layers = 2
+# d=4
+# num_train=2048
+# num_iterations = 1000
+# learning_rate = 7e-1
+# damping_coeff = 1e-8
+[[experiment]]
+name = "gaussian"
+seed = 42
+dim = 4
+n_features = 2
+domain = [-3, 3]
+num_train = 1024
+num_test = 512
+num_layers = 3
+d_lift = 4
+# rank = 2
+init_constant = 1e-5
+[[experiment.optimizer]]
+name = "ngd"
+num_iterations = 1000
+# learning_rate = 6e-1
+learning_rate = "line_search"
+damping_coeff = 1e-5           #1e-6
+adaptive_damping_coeff = false
+[[experiment.optimizer]]
+name = "adam"
+num_iterations = 1000
+learning_rate = "line_search"
+[[experiment.optimizer]]
+name = "bfgs"
+num_iterations = 1000
+learning_rate = "line_search"
+# d=4
+# num_train = 512
+# num_iterations = 1000
+# learning_rate = 9e-1
+# damping_coeff = 6e-7
