@@ -8,6 +8,7 @@ import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import Literal, Optional, Union
 
 import jax
@@ -21,8 +22,21 @@ from jaxtyping import Array, Float
 from tqdm import tqdm
 
 from ctt.bases import make_canonical_polynomials
-from ctt.model import _eval_bases
-from ctt.tt import full_to_tt_truncate, tt_to_full, validate_ranks
+from ctt.model import _eval_bases, eval_ftt
+from ctt.ngd import ctt_apply_updates, ctt_linesearch, ctt_natural_grad
+from ctt.tt import (
+    TT,
+    full_to_tt_truncate,
+    tt_add,
+    tt_cp_dot,
+    tt_dist,
+    tt_mul_scalar,
+    tt_norm,
+    tt_orth_right,
+    tt_randn,
+    tt_to_full,
+    validate_ranks,
+)
 
 # ------------------------------
 # Global setup
@@ -146,6 +160,16 @@ def compute_loss(
 
 
 @jax.jit
+def compute_loss_ctt(
+    tensors: list[TT], x: Float[Array, "B d"], y: Float[Array, "B d_o"]
+) -> float:
+    B = x.shape[0]
+    y_pred = jax.vmap(_eval_ctt, in_axes=(None, 0))(tensors, x)
+    loss = jnp.sum((y_pred - y) ** 2) / B
+    return 0.5 * loss
+
+
+@jax.jit
 def grad_loss(
     y_hat: Float[Array, "B d_o"], y: Float[Array, "B d_o"]
 ) -> Float[Array, "B d_o"]:
@@ -185,8 +209,21 @@ def _eval_ct(tensors: list[Tensor], x: Float[Array, "d"]) -> Float[Array, "d_o"]
     """Evaluate a Compositional Tensor."""
 
     def _body_fn(i: int, val: Float[Array, "d"]) -> Float[Array, "d"]:
-        control = jax.lax.switch(i, [lambda u=u: u for u in tensors])
-        return val + _eval_tensor(control, val)
+        layer = jax.lax.switch(i, [lambda u=u: u for u in tensors])
+        return val + _eval_tensor(layer, val)
+
+    x = lift(x)
+    val = jax.lax.fori_loop(0, len(tensors), _body_fn, x)
+    val = retraction(val)
+    return val
+
+
+def _eval_ctt(tensors: list[TT], x: Float[Array, "d"]) -> Float[Array, "d_o"]:
+    """Evaluate a Compositional Tensor-Train."""
+
+    def _body_fn(i: int, val: Float[Array, "d"]) -> Float[Array, "d_o"]:
+        layer = jax.lax.switch(i, [lambda u=u: u for u in tensors])
+        return val + eval_ftt(bases, x, layer)
 
     x = lift(x)
     val = jax.lax.fori_loop(0, len(tensors), _body_fn, x)
@@ -290,22 +327,7 @@ X_val = random.uniform(
 )
 y_val = jax.vmap(target)(X_val)
 
-
-# def dataloader(arrays: list, batch_size: int, *, key: PRNGKeyArray):
-#     """Yield batches of data from arrays indefinitely with shuffling."""
-#     dataset_size = arrays[0].shape[0]
-#     assert all(array.shape[0] == dataset_size for array in arrays)
-#     indices = jnp.arange(dataset_size)
-#     while True:
-#         perm = random.permutation(key, indices)
-#         (key,) = random.split(key, 1)
-#         start = 0
-#         end = batch_size
-#         while end <= dataset_size:
-#             batch_perm = perm[start:end]
-#             yield tuple(array[batch_perm] for array in arrays)
-#             start = end
-#             end = start + batch_size
+y_val_norm = 0.5 * jnp.sum(y_val**2) / N_val
 
 
 # ------------------------------
@@ -438,7 +460,13 @@ def natural_gradient_descent(
             *[_block_projection(J[k]) for k in range(len(tensors))]
         )
         ngrads = list(ngrads)
-        info = {"singular_values": s, "trace": traces, "errors": errors}
+        ngrad_norms = list(map(jnp.linalg.norm, ngrads))
+        info = {
+            "singular_values": s,
+            "trace": traces,
+            "errors": errors,
+            "gradient_norm": jnp.sqrt(jnp.sum(jnp.asarray(ngrad_norms) ** 2)),
+        }
         return (ngrads, info)
 
     @jax.jit
@@ -489,6 +517,101 @@ def natural_gradient_descent(
                 if lr := getattr(state, "learning_rate", None) is not None:
                     info["learning_rate"] = lr
                     break
+
+        return params, opt_state, (l2_error, val_loss), info
+
+    return do_iter
+
+
+def natural_gradient_descent_ctt(
+    learning_rate: Union[float, Literal["line_search"]],
+    damping_coeff: float = None,
+    # adaptive_damping_coeff: bool = False, # TODO: implement it
+    max_iters: int = 100,
+    stagnation: float = 1e-8,
+    linesearch_fn=None,
+):
+    compute_natural_grads, compute_grads = ctt_natural_grad(
+        bases=bases, lift=lift, retraction=retraction, grad_loss=grad_loss
+    )
+    backtracking = learning_rate == "line_search"
+    alpha = learning_rate if isinstance(learning_rate, float) else 1.0
+
+    # @jax.jit
+    def step(
+        tensors: list[TT],
+        opt_state: tuple,
+        x: Float[Array, "B d"],
+        y: Float[Array, "B d"],
+    ):
+        info = {}
+        key = opt_state[0]
+        key, subkey = random.split(key)
+        state = (key,)
+        loss = compute_loss_ctt(tensors, x, y)
+        ngrad = compute_natural_grads(
+            key=subkey,
+            params=tensors,
+            X=x,
+            l2_regularization=damping_coeff,
+            max_iters=max_iters,
+            stagnation=stagnation,
+            y=y,
+        )
+        updates = list(map(partial(tt_mul_scalar, val=-alpha), ngrad))
+
+        def _compute_slope(dir: list[TT], params: list[TT]) -> float:
+            grads = compute_grads(params, x, y=y)
+            # contract `dir` with `\nabla f(x_k)`
+            slopes = [tt_cp_dot(dir[i], grads[i]) for i in range(len(dir))]
+            return sum(slopes)
+
+        if backtracking:
+            ls_state = opt_state[1]
+            updates, ls_state = linesearch_fn(
+                updates=updates,
+                state=ls_state,
+                params=tensors,
+                slope_fn=_compute_slope,
+                value=loss,
+                value_fn=compute_loss_ctt,
+                x=x,
+                y=y,
+            )
+            state += ls_state
+
+        params = ctt_apply_updates(tensors, updates)
+        # compute the truncation error
+        truncations_errors = []
+        for i in range(len(params)):
+            true_params = tt_add(tensors[i], updates[i])
+            truncations_errors.append(
+                (tt_dist(params[i], true_params) / tt_norm(true_params)).item()
+            )
+        info["truncation_error"] = truncations_errors
+        ngrad_norms = list(map(tt_norm, ngrad))
+        info["gradient_norm"] = jnp.sqrt(jnp.sum(jnp.asarray(ngrad_norms) ** 2))
+
+        return params, state, loss, info
+
+    def do_iter(
+        params: list[Tensor],
+        opt_state: tuple,
+        x: Float[Array, "B d"],
+        y: Float[Array, "B d"],
+        x_val: Float[Array, "B d"],
+        y_val: Float[Array, "B d"],
+    ):
+        with elapsed_timer() as t:
+            params, opt_state, l2_error, info = step(params, opt_state, x, y)
+        elapsed = t()
+        info["time"] = elapsed
+
+        val_loss = compute_loss_ctt(params, x_val, y_val)
+
+        if backtracking:
+            lr = opt_state[1]
+            info["learning_rate"] = lr
 
         return params, opt_state, (l2_error, val_loss), info
 
@@ -549,6 +672,60 @@ def gradient_descent(
     return do_iter
 
 
+def gradient_descent_ctt(
+    optimizer: optax.GradientTransformation,
+    backtracking: bool = False,
+):
+    @jax.jit
+    def step(
+        tensors: list[TT],
+        opt_state: optax.OptState,
+        x: Float[Array, "B d"],
+        y: Float[Array, "B d"],
+    ):
+        loss, grads = jax.value_and_grad(compute_loss_ctt)(tensors, x, y)
+        if backtracking:
+            updates, opt_state = optimizer.update(
+                grads,
+                opt_state,
+                tensors,
+                value=loss,
+                grad=grads,
+                value_fn=lambda p: compute_loss_ctt(p, x, y),
+            )
+        else:
+            updates, opt_state = optimizer.update(grads, opt_state, tensors)
+        params = optax.apply_updates(tensors, updates)
+        return params, opt_state, loss
+
+    def do_iter(
+        params: list[TT],
+        opt_state: optax.OptState,
+        x: Float[Array, "B d"],
+        y: Float[Array, "B d"],
+        x_val: Float[Array, "B d"],
+        y_val: Float[Array, "B d"],
+    ):
+        with elapsed_timer() as t:
+            params, opt_state, l2_error = step(params, opt_state, x, y)
+        elapsed = t()
+
+        info = {}
+        info["time"] = elapsed
+
+        val_loss = compute_loss_ctt(params, x_val, y_val)
+
+        if backtracking:
+            for state in opt_state:
+                if lr := getattr(state, "learning_rate", None) is not None:
+                    info["learning_rate"] = lr
+                    break
+
+        return params, opt_state, (l2_error, val_loss), info
+
+    return do_iter
+
+
 def bfgs(solver: jaxopt.BFGS):
     @jax.jit
     def step(
@@ -588,18 +765,24 @@ def bfgs(solver: jaxopt.BFGS):
 key, *control_keys = random.split(key, num_layers + 1)
 key, training_key = random.split(key)
 
-init_controls = [
-    math.sqrt(experiment.init_constant / (num_layers * n_features**d_lift))
-    * random.normal(key=control_key, shape=(d_lift,) + (n_features,) * d_lift)
-    for control_key in control_keys
-]
-if experiment.rank is not None:
-    ranks = [1] + [d_lift] + [experiment.rank] * (d_lift - 1) + [1]
-    init_controls = list(map(lambda x: full_to_tt_truncate(x, ranks)[0], init_controls))
-    init_controls = list(map(tt_to_full, init_controls))
+if experiment.rank is None:
+    init_controls = [
+        math.sqrt(experiment.init_constant / (num_layers * n_features**d_lift))
+        * random.normal(key=control_key, shape=(d_lift,) + (n_features,) * d_lift)
+        for control_key in control_keys
+    ]
+else:
+    ranks = [d_lift] + [experiment.rank] * (d_lift - 1) + [1]
+    ranks = validate_ranks([n_features] * d_lift, ranks)
+    init_controls = [
+        tt_mul_scalar(
+            tt_randn(control_key, [n_features] * d_lift, ranks),
+            math.sqrt(2 / (num_layers * n_features**d_lift)),
+        )
+        for control_key in control_keys
+    ]
+    init_controls = list(map(tt_orth_right, (init_controls)))
 
-y_val_norm = 0.5 * jnp.mean(y_val**2)
-print("Value range: [", jnp.min(y_val), ",", jnp.max(y_val), "]")
 
 # NGD
 opt_ngd = next(opt for opt in experiment.optimizer if opt.name == "ngd")
@@ -607,33 +790,60 @@ use_linesearch = (
     isinstance(opt_ngd.learning_rate, str) and opt_ngd.learning_rate == "line_search"
 )
 
-if isinstance(opt_ngd.learning_rate, str):
-    if opt_ngd.learning_rate != "line_search":
-        raise ValueError(f"Learning rate '{opt_ngd.learning_rate}' unknown.")
-    optimizer = optax.chain(
-        optax.sgd(learning_rate=1.0),
-        optax.scale_by_zoom_linesearch(
-            max_linesearch_steps=20, max_learning_rate=1.0, initial_guess_strategy="one"
-        ),
+# TODO: handle the case where rank is not None => use CTT optimizer
+params = init_controls
+if experiment.rank is None:
+    if isinstance(opt_ngd.learning_rate, str):
+        if opt_ngd.learning_rate != "line_search":
+            raise ValueError(f"Learning rate '{opt_ngd.learning_rate}' unknown.")
+        optimizer = optax.chain(
+            optax.sgd(learning_rate=1.0),
+            optax.scale_by_zoom_linesearch(
+                max_linesearch_steps=20,
+                max_learning_rate=1.0,
+                initial_guess_strategy="one",
+            ),
+        )
+    else:
+        optimizer = optax.sgd(learning_rate=opt_ngd.learning_rate)
+
+    state = optimizer.init(params)
+    ngd_step = natural_gradient_descent(
+        optimizer=optimizer,
+        backtracking=use_linesearch,
+        damping_coeff=opt_ngd.damping_coeff,
+        adaptive_damping_coeff=opt_ngd.adaptive_damping_coeff,
+        rank=experiment.rank,
     )
 else:
-    optimizer = optax.sgd(learning_rate=opt_ngd.learning_rate)
+    key, ngd_key = random.split(key)
+    state = (ngd_key,)
+    ls_update_fn = None
+    if isinstance(opt_ngd.learning_rate, str):
+        if opt_ngd.learning_rate != "line_search":
+            raise ValueError(f"Learning rate '{opt_ngd.learning_rate}' unknown.")
+        ls_init_fn, ls_update_fn = ctt_linesearch(
+            max_backtracking_steps=20,
+            condition="armijo",
+            increase_factor=1.5,
+            decrease_factor=0.8,
+            atol=0.0,
+        )
+        state += ls_init_fn(params)
 
-ngd_step = natural_gradient_descent(
-    optimizer=optimizer,
-    backtracking=use_linesearch,
-    damping_coeff=opt_ngd.damping_coeff,
-    adaptive_damping_coeff=opt_ngd.adaptive_damping_coeff,
-    rank=experiment.rank,
-)
+    ngd_step = natural_gradient_descent_ctt(
+        learning_rate=opt_ngd.learning_rate,
+        damping_coeff=opt_ngd.damping_coeff,
+        max_iters=100,
+        stagnation=1e-8,
+        linesearch_fn=ls_update_fn,
+    )
 
 train_losses_ngd = []
 val_losses_ngd = []
 rel_l2_ngd = []
 infos_ngd = []
 
-params = init_controls
-state = optimizer.init(params)
 
 print("------------------------------")
 print("Running natural gradient descent...")
@@ -651,11 +861,18 @@ with tqdm(
         infos_ngd.append(info)
         rl2_error = jnp.sqrt(val_loss / y_val_norm)
         rel_l2_ngd.append(rl2_error)
-        pbar.set_postfix(
+
+        postfix = dict(
             train_loss=f"{train_loss:.3e}",
             val_loss=f"{val_loss:.3e}",
             rel_l2=f"{rl2_error:.3e}",
+            gradient_norm=f"{info['gradient_norm']:.3e}",
         )
+        if info.get("truncation_error") is not None:
+            postfix["truncation_error"] = (
+                "[" + ",".join([f"{val:.3e}" for val in info["truncation_error"]]) + "]"
+            )
+        pbar.set_postfix(**postfix)
 
 print("------------------------------")
 jnp.savez(
@@ -683,7 +900,10 @@ if isinstance(opt_adam.learning_rate, str):
 else:
     optimizer = optax.adam(learning_rate=opt_adam.learning_rate)
 
-adam_step = gradient_descent(optimizer=optimizer, backtracking=use_linesearch)
+if experiment.rank is None:
+    adam_step = gradient_descent(optimizer=optimizer, backtracking=use_linesearch)
+else:
+    adam_step = gradient_descent_ctt(optimizer=optimizer, backtracking=use_linesearch)
 
 train_losses_adam = []
 val_losses_adam = []
@@ -752,9 +972,11 @@ else:
         opt_lbfgs.learning_rate, memory_size=10, scale_init_precond=True
     )
 
-
 # bfgs_step = bfgs(solver=optimizer)
-lbfgs_step = gradient_descent(optimizer, backtracking=use_linesearch)
+if experiment.rank is None:
+    lbfgs_step = gradient_descent(optimizer, backtracking=use_linesearch)
+else:
+    lbfgs_step = gradient_descent_ctt(optimizer, backtracking=use_linesearch)
 
 train_losses_lbfgs = []
 val_losses_lbfgs = []

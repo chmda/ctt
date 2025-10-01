@@ -279,6 +279,13 @@ def tt_norm(tt: TT) -> float:
     return jnp.sqrt(abs(tt_dot(tt, tt)))
 
 
+def tt_dist(A: TT, B: TT) -> float:
+    norm2_a = tt_dot(A, A)
+    norm2_b = tt_dot(B, B)
+    inner_product = tt_dot(A, B)
+    return jnp.sqrt(abs((norm2_a - 2.0 * inner_product + norm2_b)))
+
+
 def tt_dot_rank_one(a: TT, b: list[Float[Array, "m"]]) -> float:
     """
     Computes the dot product of a TT object and a rank-one TT.
@@ -535,10 +542,15 @@ def cp_to_tt(cores: CP) -> TT:
         """
         return jax.vmap(jnp.diag, in_axes=1)(factor).transpose(2, 0, 1)
 
+    # tt_cores = (
+    #     [cores[0].copy()[None, ...]]
+    #     + jax.tree.map(_factor_to_core, cores[1:-1])
+    #     + [cores[-1].copy()[..., None]]
+    # )
     tt_cores = (
-        [cores[0].copy()[None, ...]]
+        [cores[0].T[None, ...]]
         + jax.tree.map(_factor_to_core, cores[1:-1])
-        + [cores[-1].copy()[..., None]]
+        + [cores[-1][..., None]]
     )
 
     # for mu in range(1, len(cores) - 1):

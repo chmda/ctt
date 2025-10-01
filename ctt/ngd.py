@@ -5,13 +5,17 @@ import jax
 import jax.numpy as jnp
 import jax.random as random
 from jaxtyping import Array, Float, PRNGKeyArray
+from scikit_tt import TT as sk_TT
+from scikit_tt.solvers.sle import mals
+from scikit_tt.tensor_train import residual_error
 
 from ctt.bases import Basis
-from ctt.model import _eval_bases, _ftt
-from ctt.solvers import als_ls_vector
+from ctt.model import _eval_bases, eval_ftt
+from ctt.solvers import als_linear_system
 from ctt.tt import (
     CP,
     TT,
+    cp_to_tt_truncate,
     tt_add,
     tt_dims,
     tt_dot,
@@ -22,6 +26,7 @@ from ctt.tt import (
     tt_truncate,
     validate_ranks,
 )
+from ctt.tto import cpo_to_tto_truncate
 
 
 def ctt_natural_grad(
@@ -30,7 +35,7 @@ def ctt_natural_grad(
     retraction: Callable[[Float[Array, "d_lift"]], Float[Array, "d_o"]],
     grad_loss: Callable[..., Float[Array, "B d_o"]],
 ):
-    """Returns a function that computes the natural gradients,
+    r"""Returns a function that computes the natural gradients,
     and a function that computes the functional gradient of the loss.
 
     Parameters
@@ -71,7 +76,7 @@ def ctt_natural_grad(
         # _, dynamics = jax.lax.scan(_fwd, X, jnp.arange(len(params)))  # (L, d_lift)
         # dynamics = jnp.concatenate([X[None], dynamics], axis=0)  # (L+1, d_lift)
         def _layer(x: Float[Array, "d"], params: TT) -> Float[Array, "d"]:
-            return x + _ftt(bases, x, params)
+            return x + eval_ftt(bases, x, params)
 
         dynamics = [X]
         h = X
@@ -89,11 +94,51 @@ def ctt_natural_grad(
             ) -> Float[Array, "d_o"]:
                 h = y
                 for u in tts:
-                    h = h + _ftt(bases, h, u)
+                    h = h + eval_ftt(bases, h, u)
                 return retraction(h)
 
             J = jax.jacrev(u_k)(dynamics[k])  # (d_o, d_lift)
             jacobians.append(J)
+
+        # we have that `jacobians[k] = du/dx^{k+1}`
+        jacobians = jnp.stack(jacobians, axis=0)  # (L, d_o, d_lift)
+        return dynamics, jacobians
+
+    def _compute_jacobians_fast(
+        params: list[TT], x: Float[Array, "d"]
+    ) -> tuple[Float[Array, "L+1 d_o"], Float[Array, "L d_o d_lift"]]:
+        L = len(params)
+        X = lift(x)
+
+        def _layer(x: Float[Array, "d"], params: TT) -> Float[Array, "d"]:
+            return x + eval_ftt(bases, x, params)
+
+        # forward
+        dynamics = [X]
+        h = X
+        for k in range(L):
+            h = _layer(h, params[k])
+            dynamics.append(h)
+        dynamics = jnp.stack(dynamics, axis=0)
+
+        # computes the Jacobian du/du_k
+        jacobians = []
+        for k in range(1, L + 1):
+
+            def u_k(
+                y: Float[Array, "d_lift"], tts: list[TT] = params[k:]
+            ) -> Float[Array, "d_o"]:
+                h = y
+                for u in tts:
+                    h = h + eval_ftt(bases, h, u)
+                return retraction(h)
+
+            ans, vjp_py = jax.vjp(
+                u_k, dynamics[k], params
+            )  # dynamics[k] or dynamics[k-1]
+            g = vjp_py(jnp.ones_like(ans))[0]
+            g = jnp.atleast_2d(g)
+            jacobians.append(g)
 
         # we have that `jacobians[k] = du/dx^{k+1}`
         jacobians = jnp.stack(jacobians, axis=0)  # (L, d_o, d_lift)
@@ -108,8 +153,11 @@ def ctt_natural_grad(
         **extra_args: Any,
     ) -> list[CP]:
         if intermediate_values is None or jacobians is None:
+            # intermediate_values, jacobians = jax.vmap(
+            #     _compute_jacobians, in_axes=(None, 0)
+            # )(params, X)
             intermediate_values, jacobians = jax.vmap(
-                _compute_jacobians, in_axes=(None, 0)
+                _compute_jacobians_fast, in_axes=(None, 0)
             )(params, X)
 
         B, d = X.shape
@@ -165,6 +213,8 @@ def ctt_natural_grad(
         X: Float[Array, "B d"],
         weights: Optional[Float[Array, "B"]] = None,
         l2_regularization: Optional[float] = None,
+        max_iters: int = 100,
+        stagnation: float = 1e-8,
         **extra_args: dict[str, Any],
     ) -> list[TT]:
         B, d = X.shape
@@ -173,12 +223,57 @@ def ctt_natural_grad(
             weights = jnp.ones((B,))
         weights = weights / jnp.sum(weights)
 
+        # intermediate_values, jacobians = jax.vmap(
+        #     _compute_jacobians, in_axes=(None, 0)
+        # )(params, X)
         intermediate_values, jacobians = jax.vmap(
-            _compute_jacobians, in_axes=(None, 0)
+            _compute_jacobians_fast, in_axes=(None, 0)
         )(params, X)
         outputs = jax.vmap(retraction)(intermediate_values[:, -1, :])  # (B, d_o)
         grad_loss_ = partial(grad_loss, **extra_args)
         grad_losses = grad_loss_(outputs)  # (B, d_o)
+
+        def _assemble_normal_equation(
+            tt: TT,
+            jac: Float[Array, "B d_o d_lift"],
+            u_k: Float[Array, "B d_lift"],
+            op_ranks: list[int],
+        ) -> tuple[TT, TT]:
+            # first, compute the Gram matrix `G`
+            def _compute_rank_one_tensor(
+                w: float, J: Float[Array, "d_o d_lift"], h: Float[Array, "d_lift"]
+            ) -> CP:
+                # the first leg is J.T @ J
+                first_leg = J.T @ J  # (d_lift, d_lift)
+                # the second leg is (\phi^1(h_1) \phi^1(h_1)^T) ⊗ ... ⊗ (\phi^d(h_d)\phi^d(h_d)^T)
+                phi = _eval_bases(bases, h)  # (m,)*d_lift
+                tmp = jax.tree.map(jnp.outer, phi, phi)  # (m, m)*d_lift
+                return [w * first_leg] + tmp
+
+            factors = jax.vmap(_compute_rank_one_tensor)(weights, jac, u_k)
+            # the Gram operator is converted to the TT format using truncation
+            gram = cpo_to_tto_truncate(factors, op_ranks)
+
+            # we have ∇_{\theta_k} L(u) = \int <∇L(u)(x), du/d\theta_k(x)> d\mu(x) \in R^{d_lift x n x ... x n}
+            # so we have first to contract ∇L(u)(x) with the leg of du/d\theta_k that corresponds to `d_o`
+            first_leg = jax.vmap(jnp.matmul)(grad_losses, jac)  # (B, d_lift)
+
+            # now, <∇L(u)(x), du/d\theta_k(x)> is of the form
+            # A_k(x) ⊗ \Phi(u_{k-1}(x))
+            # which is in the CP format
+            # the integral is discretized using Monte-Carlo, therefore the ranks would be upper bounded by `B`.
+            phi = jax.vmap(_eval_bases, in_axes=(None, 0))(bases, u_k)  # (B, m)*d_lift
+            factors = [weights[:, None] * first_leg] + phi  # (d_lift+1)-order tensor
+            # we convert the tensor in the CP format to a tensor in the TT format
+            # the ranks of the TT are however high (`B`), so we have to do truncation or rounding.
+            # the best method would be `rounding`, however, due to JAX, the output ranks will not be predictable.
+            # therefore, we decide to use `truncation`, where the ranks are the same as `tensor`.
+            ranks = tt_ranks(tt)
+            ranks.insert(0, 1)
+            # rhs = cp_to_tt_truncate(factors, ranks)
+            rhs = cp_to_tt_truncate(factors, op_ranks)
+
+            return gram, rhs
 
         def _natural_grad(
             subkey: PRNGKeyArray,
@@ -187,30 +282,63 @@ def ctt_natural_grad(
             u_k: Float[Array, "B d_lift"],
             grad: Float[Array, "B d_o"],
         ) -> TT:
-            du_dthetak = [jac] + jax.vmap(_eval_bases, in_axes=(None, 0))(bases, u_k)
+            # du_dthetak = [jac] + jax.vmap(_eval_bases, in_axes=(None, 0))(bases, u_k)
             ranks = tt_ranks(tt)
             dims = tt_dims(tt)
-            twice_ranks = [ranks[0]] + list(map(lambda x: 2 * x, ranks[1:]))
-            twice_ranks = validate_ranks(dims, twice_ranks)
-            init_tt = tt_randn(subkey, dims, twice_ranks)
+            # we might need higher ranks for converging
+            # op_ranks = [ranks[0]] + list(map(lambda x: x**2, ranks[1:]))
+            op_ranks = [1] + [ranks[0]] + list(map(lambda x: x**2, ranks[1:]))
+            # op_ranks = [1] + ranks
+            # op_ranks = validate_ranks(dims, op_ranks)
+            op_ranks = validate_ranks([ranks[0]] + dims, op_ranks)
+            init_tt = tt_randn(subkey, [ranks[0]] + dims, op_ranks)
 
             # solve the least-squares problem \sum_j ||<d u^j/d theta_k, d> - ∇L(u)(x)_j||^2
             # NOTE: in our case, the natural metric g_\theta is exactly the metric on H,
             # because D^2H = Id
-            iterations, stag, residual, dir = als_ls_vector(
-                du_dthetak,
-                grad,
-                init_tt,
-                weights=weights,
-                max_iters=100,
-                stagnation=1e-8,
-                l2_regularization=l2_regularization,
-                # cutoff=1e-5,
-            )
-            # iterations, stag, dir = riemannian_ls(
-            #     du_dthetak, grad, tt, weights=weights, max_iters=50, rtol=1e-5
+            # iterations, stag, residual, dir = als_ls_vector(
+            #     du_dthetak,
+            #     grad,
+            #     init_tt,
+            #     weights=weights,
+            #     max_iters=max_iters,
+            #     stagnation=stagnation,
+            #     l2_regularization=l2_regularization,
+            #     # cutoff=1e-5,
             # )
 
+            # or instead solve the normal equation G @ d = b
+            # compute the tensor operator that corresponds to the Gram matrix
+            gram, rhs = _assemble_normal_equation(tt, jac, u_k, op_ranks)
+
+            # TODO: change to solving least-squares problem
+            # solve the linear system G @ d = b
+            iterations, stag, dir = als_linear_system(
+                gram,
+                rhs,
+                init_tt,
+                max_iters=max_iters,
+                stagnation=stagnation,
+                l2_regularization=l2_regularization,
+            )
+            # NOTE: we are using `scikit_tt` to check if our ALS implementation is correct
+            gram_sk = sk_TT(gram)
+            rhs_sk = sk_TT([core[:, :, None, :] for core in rhs])
+            init_sk = sk_TT([core[:, :, None, :] for core in init_tt])
+            jax.debug.print(
+                "Our ALS residual: {residual:.3e}",
+                residual=residual_error(
+                    gram_sk, sk_TT([core[:, :, None, :] for core in dir]), rhs_sk
+                ),
+            )
+            dir = mals(gram_sk, init_sk, rhs_sk, repeats=1, threshold=1e-8, solver="lu")
+            jax.debug.print(
+                "MALS residual: {residual:.3e}",
+                residual=residual_error(gram_sk, dir, rhs_sk),
+            )
+            # `dir` is of order d_lift+1, we contract the first two cores to have a vector output TT of order d_lift
+            dir = [core[:, :, 0, :] for core in dir.cores]
+            dir = [jnp.einsum("ijk,kmn->jmn", dir[0], dir[1])] + dir[2:]
             return dir
 
         subkeys = random.split(key, num=L)
@@ -293,8 +421,8 @@ def ctt_apply_updates(x: list[TT], y: list[TT]) -> list[TT]:
         new_cores.append(last)
         return new_cores
 
-    # return list(map(_update, x, y))
-    return list(map(_update_fused, x, y))
+    return list(map(_update, x, y))
+    # return list(map(_update_fused, x, y))
 
 
 class LinesearchState(NamedTuple):

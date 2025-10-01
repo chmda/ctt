@@ -6,6 +6,8 @@ from jaxtyping import Array, Float
 from ctt.bases import Basis
 from ctt.tt import TT, tt_matvec
 
+__all__ = ["eval_ftt", "make_ctt"]
+
 
 class CTT(Protocol):
     def __call__(self, tts: list[TT], x: Float[Array, "d"]) -> Float[Array, "d_o"]: ...
@@ -15,7 +17,7 @@ def _eval_bases(bases: list[Basis], x: Float[Array, "d"]) -> list[Float[Array, "
     return list(map(lambda b, y: b(y), bases, x))
 
 
-def _ftt(bases: list[Basis], x: Float[Array, "d"], tt: TT) -> Float[Array, "d"]:
+def eval_ftt(bases: list[Basis], x: Float[Array, "d"], tt: TT) -> Float[Array, "d"]:
     # features = [bases[i](x[i]) for i in range(x.shape[0])]  # (m,)*d
     features = _eval_bases(bases, x)
     result = tt_matvec(tt, features)  # (d, 1)
@@ -34,7 +36,7 @@ def make_ctt(
     def _ctt(tts: list[TT], x: Float[Array, "d"]) -> Float[Array, "d_o"]:
         def _body_fn(i: int, val: Float[Array, "d"]) -> Float[Array, "d"]:
             control = jax.lax.switch(i, [lambda u=u: u for u in tts])
-            return val + _ftt(bases, val, control)
+            return val + eval_ftt(bases, val, control)
 
         x = lift(x)
         val = jax.lax.fori_loop(0, len(tts), _body_fn, x)
