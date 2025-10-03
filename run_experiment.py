@@ -126,7 +126,7 @@ experiment = next(exp for exp in experiments if exp.name == name)
 # ------------------------------
 # Experiment setup
 # ------------------------------
-key = random.PRNGKey(experiment.seed)
+key = random.key(experiment.seed)
 d = experiment.dim
 n_features = experiment.n_features
 basis = make_canonical_polynomials(dim=n_features)
