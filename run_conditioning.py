@@ -1,5 +1,5 @@
 """
-Experiment runner for learning functions with Compositional Tensor(-Trains) (CT(T)s).
+Experiment runner for computing the condition number and the rank of the Gram matrices.
 """
 
 import math
@@ -34,11 +34,25 @@ plt.rcParams["svg.fonttype"] = "none"
 plt.rcParams.update(
     {
         "text.usetex": True,
-        "font.family": "serif",
-        # "font.serif": ["Computer Modern Roman"],
-        "font.size": 11,
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Verdana", "Arial", "Open Sans", "DejaVu Sans"],
+        "font.size": 12,
     }
 )
+
+# Different line styles, markers, and colors for distinction
+line_styles = ["-", "--", "-.", ":"]
+markers = ["o", "s", "^", "d", "x", "*"]
+colors = [
+    "#000000",
+    "#E69F00",
+    "#56B4E9",
+    "#009E73",
+    "#F0E442",
+    "#0072B2",
+    "#D55E00",
+    "#CC79A7",
+]
 
 
 # ------------------------------
@@ -289,8 +303,6 @@ def run_experiment(
     key: PRNGKeyArray,
     experiment: Experiment,
 ) -> tuple[PRNGKeyArray, tuple[Float[Array, "n_iterations"], list[dict]]]:
-    print("Key:", key)
-
     # ------------------------------
     # Data generation
     # ------------------------------
@@ -398,7 +410,7 @@ print("Running experiments...")
 
 seed = 0
 key = random.key(seed)
-N_EXPERIMENTS = 20
+N_EXPERIMENTS = 100
 
 rel_l2 = []
 condition_numbers = []
@@ -426,82 +438,177 @@ ranks = jnp.asarray(ranks)  # (n_experiments, n_iterations, n_layers)
 n_iterations = experiment.optimizer.num_iterations
 
 # condition number
-condition_numbers_mean = jnp.mean(condition_numbers, axis=0)  # (n_iterations, n_layers)
-condition_numbers_std = jnp.std(condition_numbers, axis=0)  # (n_iterations, n_layers)
+condition_numbers_median = jnp.median(
+    condition_numbers, axis=0
+)  # (n_iterations, n_layers)
+# condition_numbers_std = jnp.std(condition_numbers, axis=0)  # (n_iterations, n_layers)
+condition_numbers_q1 = jnp.percentile(condition_numbers, 25, axis=0)
+condition_numbers_q3 = jnp.percentile(condition_numbers, 75, axis=0)
 
-plt.figure(figsize=(15, 8))
+fig, ax1 = plt.subplots(figsize=(15, 8))
 
+num_markers = 10
+marker_positions = jnp.unique(
+    jnp.round(jnp.logspace(0, jnp.log10(n_iterations - 1), num=num_markers)).astype(int)
+)
+marker_positions = jnp.clip(marker_positions, 0, n_iterations - 1)
 for i, ls, marker, color in zip(
     range(experiment.num_layers),
-    ["-", "--", ":"],
-    ["*", "s", "^"],
-    ["#bb5566", "#004488", "#ddaa33"],
+    line_styles,
+    markers,
+    colors,
 ):
-    plt.loglog(
+    ax1.plot(
         jnp.arange(1, n_iterations + 1),
-        condition_numbers_mean[:, i],
+        condition_numbers_median[:, i],
         label=f"Layer {i + 1}",
         ls=ls,
         marker=marker,
         color=color,
-        markevery=n_iterations // 25,
+        markevery=marker_positions,
     )
-    plt.fill_between(
+    # ax1.fill_between(
+    #     jnp.arange(1, n_iterations + 1),
+    #     condition_numbers_median[:, i] - condition_numbers_std[:, i],
+    #     condition_numbers_median[:, i] + condition_numbers_std[:, i],
+    #     color=color,
+    #     alpha=0.3,
+    # )
+    ax1.fill_between(
         jnp.arange(1, n_iterations + 1),
-        condition_numbers_mean[:, i] - condition_numbers_std[:, i] / N_EXPERIMENTS,
-        condition_numbers_mean[:, i] + condition_numbers_std[:, i] / N_EXPERIMENTS,
+        condition_numbers_q1[:, i],
+        condition_numbers_q3[:, i],
         color=color,
         alpha=0.3,
     )
-plt.grid()
-plt.legend()
-plt.xlim(
-    1,
-    n_iterations + 1,
+
+
+# Formatting
+ax1.set_xscale("log")
+ax1.set_yscale("log")
+ax1.set_xlim(1, n_iterations + 1)
+ax1.set_xlabel("Iteration")
+ax1.set_ylabel("Condition number")
+ax1.grid(True, which="both", linestyle="--", alpha=0.7)
+
+# Plot the relative L2
+rel_l2_median = jnp.median(rel_l2, axis=0)
+# rel_l2_std = jnp.std(rel_l2, axis=0)
+rel_l2_q1 = jnp.percentile(rel_l2, 25, axis=0)
+rel_l2_q3 = jnp.percentile(rel_l2, 75, axis=0)
+
+ax2 = ax1.twinx()
+ls = line_styles[(experiment.num_layers + 1) % len(line_styles)]
+marker = markers[(experiment.num_layers + 1) % len(markers)]
+color = colors[(experiment.num_layers + 1) % len(colors)]
+ax2.plot(
+    jnp.arange(1, n_iterations + 1),
+    rel_l2_median,
+    label="Error",
+    ls=ls,
+    marker=marker,
+    color=color,
+    markevery=marker_positions,
 )
-plt.xlabel("Iterations")
-plt.ylabel("Condition number")
-plt.tight_layout(pad=1.10)
+# ax2.fill_between(
+#     jnp.arange(1, n_iterations + 1),
+#     rel_l2_mean - rel_l2_std / N_EXPERIMENTS,
+#     rel_l2_mean + rel_l2_std / N_EXPERIMENTS,
+#     color=color,
+#     alpha=0.3,
+# )
+ax2.fill_between(
+    jnp.arange(1, n_iterations + 1), rel_l2_q1, rel_l2_q3, color=color, alpha=0.3
+)
+ax2.set_yscale("log")
+ax2.set_ylabel("Relative L2")
+
+lines, labels = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax2.legend(lines + lines2, labels + labels2)
+
+fig.tight_layout()
 plt.savefig(os.path.join(directory, "data", f"{filename}.pdf"), format="pdf", dpi=1200)
 plt.show()
 
 # ranks
-ranks_mean = jnp.mean(ranks, axis=0)  # (n_iterations, n_layers)
-ranks_std = jnp.std(ranks, axis=0)  # (n_iterations, n_layers)
+ranks_median = jnp.median(ranks, axis=0)  # (n_iterations, n_layers)
+# ranks_std = jnp.std(ranks, axis=0)  # (n_iterations, n_layers)
+ranks_q1 = jnp.percentile(ranks, 25, axis=0)
+ranks_q3 = jnp.percentile(ranks, 75, axis=0)
 
-plt.figure(figsize=(15, 8))
+fig, ax1 = plt.subplots(figsize=(15, 8))
 
 for i, ls, marker, color in zip(
     range(experiment.num_layers),
-    ["-", "--", ":"],
-    ["*", "s", "^"],
-    ["#bb5566", "#004488", "#ddaa33"],
+    line_styles,
+    markers,
+    colors,
 ):
-    plt.semilogx(
+    ax1.plot(
         jnp.arange(1, n_iterations + 1),
-        ranks_mean[:, i],
+        ranks_median[:, i],
         label=f"Layer {i + 1}",
         ls=ls,
         marker=marker,
         color=color,
-        markevery=n_iterations // 25,
+        markevery=marker_positions,
     )
-    plt.fill_between(
+    # ax1.fill_between(
+    #     jnp.arange(1, n_iterations + 1),
+    #     ranks_median[:, i] - ranks_std[:, i] / N_EXPERIMENTS,
+    #     ranks_median[:, i] + ranks_std[:, i] / N_EXPERIMENTS,
+    #     color=color,
+    #     alpha=0.3,
+    # )
+    ax1.fill_between(
         jnp.arange(1, n_iterations + 1),
-        ranks_mean[:, i] - ranks_std[:, i] / N_EXPERIMENTS,
-        ranks_mean[:, i] + ranks_std[:, i] / N_EXPERIMENTS,
+        ranks_q1[:, i],
+        ranks_q3[:, i],
         color=color,
         alpha=0.3,
     )
-plt.grid()
-plt.legend()
-plt.xlim(
-    1,
-    n_iterations + 1,
+
+
+# Formatting
+ax1.set_xscale("log")
+ax1.set_xlim(1, n_iterations + 1)
+ax1.set_xlabel("Iteration")
+ax1.set_ylabel("Rank")
+ax1.grid(True, which="both", linestyle="--", alpha=0.7)
+
+# Plot the relative L2
+ax2 = ax1.twinx()
+ls = line_styles[(experiment.num_layers + 1) % len(line_styles)]
+marker = markers[(experiment.num_layers + 1) % len(markers)]
+color = colors[(experiment.num_layers + 1) % len(colors)]
+ax2.plot(
+    jnp.arange(1, n_iterations + 1),
+    rel_l2_median,
+    label="Error",
+    ls=ls,
+    marker=marker,
+    color=color,
+    markevery=marker_positions,
 )
-plt.xlabel("Iterations")
-plt.ylabel("Rank")
-plt.tight_layout(pad=1.10)
+# ax2.fill_between(
+#     jnp.arange(1, n_iterations + 1),
+#     rel_l2_mean - rel_l2_std / N_EXPERIMENTS,
+#     rel_l2_mean + rel_l2_std / N_EXPERIMENTS,
+#     color=color,
+#     alpha=0.3,
+# )
+ax2.fill_between(
+    jnp.arange(1, n_iterations + 1), rel_l2_q1, rel_l2_q3, color=color, alpha=0.3
+)
+ax2.set_yscale("log")
+ax2.set_ylabel("Relative L2")
+
+lines, labels = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax2.legend(lines + lines2, labels + labels2)
+
+fig.tight_layout()
 plt.savefig(
     os.path.join(directory, "data", f"{filename}_ranks.pdf"), format="pdf", dpi=1200
 )

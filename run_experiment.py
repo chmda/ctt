@@ -53,11 +53,25 @@ plt.rcParams["svg.fonttype"] = "none"
 plt.rcParams.update(
     {
         "text.usetex": True,
-        "font.family": "serif",
-        # "font.serif": ["Computer Modern Roman"],
-        "font.size": 11,
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Verdana", "Arial", "Open Sans", "DejaVu Sans"],
+        "font.size": 12,
     }
 )
+
+# Different line styles, markers, and colors for distinction
+line_styles = ["-", "--", "-.", ":"]
+markers = ["o", "s", "^", "d", "x", "*"]
+colors = [
+    "#000000",
+    "#E69F00",
+    "#56B4E9",
+    "#009E73",
+    "#F0E442",
+    "#0072B2",
+    "#D55E00",
+    "#CC79A7",
+]
 
 
 # ------------------------------
@@ -1025,42 +1039,47 @@ jnp.savez(
 # loss
 plt.figure(figsize=(15, 8))
 
-plt.loglog(
-    jnp.arange(1, opt_ngd.num_iterations + 1),
-    rel_l2_ngd,
-    label="NGD",
-    ls="-",
-    marker="*",
-    color="#bb5566",
-    markevery=opt_ngd.num_iterations // 25,
-)
-plt.loglog(
-    jnp.arange(1, opt_adam.num_iterations + 1),
-    rel_l2_adam,
-    label="Adam",
-    ls="--",
-    marker="s",
-    color="#004488",
-    markevery=opt_adam.num_iterations // 25,
-)
-plt.loglog(
-    jnp.arange(1, opt_lbfgs.num_iterations + 1),
-    rel_l2_lbfgs,
-    label="LBFGS",
-    ls=":",
-    marker="^",
-    color="#ddaa33",
-    markevery=opt_lbfgs.num_iterations // 25,
-)
-plt.grid()
-plt.legend()
-plt.xlim(
-    1,
-    max(opt_ngd.num_iterations, opt_adam.num_iterations, opt_lbfgs.num_iterations) + 1,
-)
-plt.xlabel("Iterations")
+data = [
+    ("NGD", opt_ngd.num_iterations, rel_l2_ngd),
+    ("Adam", opt_adam.num_iterations, rel_l2_adam),
+    ("LBFGS", opt_lbfgs.num_iterations, rel_l2_lbfgs),
+]
+max_len = 0
+for i, (label, num_iterations, rel_l2) in enumerate(data):
+    x = jnp.arange(1, num_iterations + 1)
+    style = line_styles[i % len(line_styles)]
+    marker = markers[i % len(markers)]
+    color = colors[i % len(colors)]
+
+    num_markers = 10
+    marker_positions = jnp.unique(
+        jnp.round(jnp.logspace(0, jnp.log10(len(x) - 1), num=num_markers)).astype(int)
+    )
+    marker_positions = jnp.clip(marker_positions, 0, len(x) - 1)
+
+    plt.plot(
+        x,
+        rel_l2,
+        linestyle=style,
+        marker=marker,
+        color=color,
+        label=label,
+        linewidth=1.5,
+        markevery=marker_positions,
+    )
+    max_len = max(max_len, num_iterations)
+
+# Formatting
+plt.xscale("log")
+plt.yscale("log")
+plt.xlim(1, max_len + 1)
+plt.xlabel("Iteration")
 plt.ylabel("Relative L2 error")
-plt.tight_layout(pad=1.10)
+plt.legend()
+plt.grid(True, which="both", linestyle="--", alpha=0.7)
+# plt.grid()
+plt.tight_layout()
+
 plt.savefig(
     os.path.join(directory, "data", f"{filename}_error.pdf"), format="pdf", dpi=1200
 )
@@ -1083,42 +1102,49 @@ times_bfgs = jnp.asarray([info["time"] for info in infos_lbfgs])
 indices_bfgs = times_bfgs < 1000
 x_bfgs = jnp.cumsum(times_bfgs[indices_bfgs])
 
-plt.loglog(
-    x_ngd,
-    jnp.asarray(rel_l2_ngd)[indices_ngd],
-    label="NGD",
-    ls="-",
-    marker="*",
-    color="#bb5566",
-    markevery=opt_ngd.num_iterations // 25,
-)
-plt.loglog(
-    x_adam,
-    jnp.asarray(rel_l2_adam)[indices_adam],
-    label="Adam",
-    ls="--",
-    marker="s",
-    color="#004488",
-    markevery=opt_adam.num_iterations // 25,
-)
-plt.loglog(
-    x_bfgs,
-    jnp.asarray(rel_l2_lbfgs)[indices_bfgs],
-    label="LBFGS",
-    ls=":",
-    marker="^",
-    color="#ddaa33",
-    markevery=opt_lbfgs.num_iterations // 25,
-)
-plt.grid()
-plt.legend()
-plt.xlim(
-    min(jnp.min(x_ngd), jnp.min(x_adam), jnp.min(x_bfgs)),
-    max(jnp.max(x_ngd), jnp.max(x_adam), jnp.max(x_bfgs)),
-)
+data = [
+    ("NGD", x_ngd, jnp.asarray(rel_l2_ngd)[indices_ngd]),
+    ("Adam", x_adam, jnp.asarray(rel_l2_adam)[indices_adam]),
+    ("LBFGS", x_bfgs, jnp.asarray(rel_l2_lbfgs)[indices_bfgs]),
+]
+min_len = jnp.min(x_ngd)
+max_len = 0
+for i, (label, x, rel_l2) in enumerate(data):
+    style = line_styles[i % len(line_styles)]
+    marker = markers[i % len(markers)]
+    color = colors[i % len(colors)]
+
+    num_markers = 10
+    marker_positions = jnp.unique(
+        jnp.round(jnp.logspace(0, jnp.log10(len(x) - 1), num=num_markers)).astype(int)
+    )
+    marker_positions = jnp.clip(marker_positions, 0, len(x) - 1)
+
+    plt.plot(
+        x,
+        rel_l2,
+        linestyle=style,
+        marker=marker,
+        color=color,
+        label=label,
+        linewidth=1.5,
+        markevery=marker_positions,
+    )
+    min_len = min(min_len, jnp.min(x))
+    max_len = max(max_len, jnp.max(x))
+
+# Formatting
+plt.xscale("log")
+plt.yscale("log")
+plt.xlim(min_len, max_len + 1)
 plt.xlabel("Time (ms)")
 plt.ylabel("Relative L2 error")
-plt.tight_layout(pad=1.10)
+plt.legend()
+plt.grid(True, which="both", linestyle="--", alpha=0.7)
+# plt.grid()
+plt.tight_layout()
+
+
 plt.savefig(
     os.path.join(directory, "data", f"{filename}_time.pdf"), format="pdf", dpi=1200
 )
