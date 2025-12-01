@@ -30,10 +30,13 @@ files = [
     # (25, "20251007-104136_sos_sketching_d4_ngd.npz"),
     # (30, "20251007-095618_sos_sketching_d4_ngd.npz"),
     # (35, "20251007-104624_sos_sketching_d4_ngd.npz"),
-    (20, "20251014-132511_sos_sketching_d4_ngd.npz"),
-    (25, "20251014-142710_sos_sketching_d4_ngd.npz"),
-    (30, "20251014-144617_sos_sketching_d4_ngd.npz"),
-    (35, "20251014-144714_sos_sketching_d4_ngd.npz"),
+    # (20, "20251014-132511_sos_sketching_d4_ngd.npz"),
+    # (25, "20251014-142710_sos_sketching_d4_ngd.npz"),
+    # (30, "20251014-144617_sos_sketching_d4_ngd.npz"),
+    # (35, "20251014-144714_sos_sketching_d4_ngd.npz"),
+    (20, "20251127-100456_sos_sketching_d4_ngd.npz"),
+    (30, "20251127-100636_sos_sketching_d4_ngd.npz"),
+    (40, "20251127-100758_sos_sketching_d4_ngd.npz"),
 ]
 
 # Different line styles, markers, and colors for distinction

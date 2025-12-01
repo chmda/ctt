@@ -59,11 +59,11 @@ num_train = 2048
 num_test = 512
 num_layers = 2
 # rank = 2
-sketching_rank = 35
+sketching_rank = 40
 [[experiment.optimizer]]
 name = "ngd"
-num_iterations = 5_000
-learning_rate = 0.8    # 0.5 -> 2e-6
+num_iterations = 10_000
+learning_rate = 0.7     # 0.5 -> 2e-6
 # learning_rate = "line_search"
 damping_coeff = 1e-12          # 1e-11 -> 2e-6
 adaptive_damping_coeff = false
