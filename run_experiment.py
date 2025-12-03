@@ -21,6 +21,7 @@ import tomllib
 from jaxtyping import Array, Float
 from tqdm import tqdm
 
+from benchmark_functions import benchmark_function
 from ctt.bases import make_canonical_polynomials
 from ctt.model import _eval_bases, eval_ftt
 from ctt.ngd import ctt_apply_updates, ctt_linesearch, ctt_natural_grad
@@ -284,40 +285,41 @@ Sigma = jnp.linalg.inv(M)
 # ------------------------------
 
 
-@jax.jit
-def target(x: Float[Array, "d"]) -> Float[Array, "m"]:
-    """Compute target function value at x based on experiment type."""
-    if function == "gaussian":
-        val = jax.scipy.stats.multivariate_normal.pdf(
-            x=x, mean=jnp.zeros_like(x), cov=Sigma
-        )
-    elif function == "henon-heiles":
-        val = (
-            0.5 * jnp.sum(x**2)
-            + 0.2 * jnp.sum(x[:-1] * x[1:] ** 2 - x[:-1] ** 3)
-            + 0.2**2 / 16 * jnp.sum((x[:-1] ** 2 + x[1:] ** 2) ** 2)
-        )
-    elif function == "toy":
-        # val = jnp.log(1e-1 + 3*jnp.sum(x)**2)
-        val = jnp.exp(jnp.prod(x)) / jnp.exp(1)
-    elif function == "sos":
-        # assert d % 2 == 0, "'d' should be even"
-        # m = d // 2
-        # x1, x2 = x[:m], x[m:]
-        # diff = x1 - x2
-        # p = jnp.prod(diff)
-        # val = p**2
-        # z = 0 if d % 2 == 0 else x[-1]
-        # m = d // 2 if d % 2 == 0 else (d - 1) // 2
-        # diff = x[:m] - x[m : 2 * m] + z
-        # val = jnp.prod(diff) ** 2
-        z = 1 if d % 2 == 0 else x[-1]
-        m = d // 2
-        diff = x[:m] * z - x[m : 2 * m]
-        val = jnp.prod(diff) ** 2
-    else:
-        raise ValueError(f"Unknown function type: {function}")
-    return jnp.atleast_1d(val)
+# @jax.jit
+# def target(x: Float[Array, "d"]) -> Float[Array, "m"]:
+#     """Compute target function value at x based on experiment type."""
+#     if function == "gaussian":
+#         val = jax.scipy.stats.multivariate_normal.pdf(
+#             x=x, mean=jnp.zeros_like(x), cov=Sigma
+#         )
+#     elif function == "henon-heiles":
+#         val = (
+#             0.5 * jnp.sum(x**2)
+#             + 0.2 * jnp.sum(x[:-1] * x[1:] ** 2 - x[:-1] ** 3)
+#             + 0.2**2 / 16 * jnp.sum((x[:-1] ** 2 + x[1:] ** 2) ** 2)
+#         )
+#     elif function == "toy":
+#         # val = jnp.log(1e-1 + 3*jnp.sum(x)**2)
+#         val = jnp.exp(jnp.prod(x)) / jnp.exp(1)
+#     elif function == "sos":
+#         # assert d % 2 == 0, "'d' should be even"
+#         # m = d // 2
+#         # x1, x2 = x[:m], x[m:]
+#         # diff = x1 - x2
+#         # p = jnp.prod(diff)
+#         # val = p**2
+#         # z = 0 if d % 2 == 0 else x[-1]
+#         # m = d // 2 if d % 2 == 0 else (d - 1) // 2
+#         # diff = x[:m] - x[m : 2 * m] + z
+#         # val = jnp.prod(diff) ** 2
+#         z = 1 if d % 2 == 0 else x[-1]
+#         m = d // 2
+#         diff = x[:m] * z - x[m : 2 * m]
+#         val = jnp.prod(diff) ** 2
+#     else:
+#         raise ValueError(f"Unknown function type: {function}")
+#     return jnp.atleast_1d(val)
+target = benchmark_function(function, d)
 
 
 # ------------------------------

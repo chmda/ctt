@@ -221,7 +221,7 @@ def als_ls_vector(
     l2_regularization: Optional[float] = None,
     cutoff: Optional[float] = None,
 ) -> tuple[int, float, float, TT]:
-    """
+    r"""
     Solve a least-squares problem using Alternating Least Squares (ALS) for vector-valued tensor trains.
 
     Each batch input of `A` is assumed to be of the form :math:`(\psi_b \otimes \Phi_b)`, where :math:`\psi_b \in \mathbb{R}^{d_o \times d}`
@@ -412,6 +412,146 @@ def als_ls_vector(
         _cond, _body, init_val=(0, jnp.inf, jnp.inf, x0)
     )
     return iters, stag, residual, guess
+
+
+def als_ls(
+    A: list[Float[Array, "B m"]],
+    b: Float[Array, "B"],
+    x0: TT,
+    weights: Optional[Float[Array, "B"]] = None,
+    *,
+    max_iters: int = 30,
+    stagnation: float = 1e-5,
+    l2_regularization: Optional[float] = None,
+    cutoff: Optional[float] = None,
+) -> tuple[int, float, TT, dict]:
+    B = A[0].shape[0]
+    order = len(x0)
+
+    assert b.shape == (B,)
+    assert len(A) == order
+
+    if weights is None:
+        weights = jnp.ones((B,))
+
+    weights = weights / jnp.sum(weights)
+    sqrt_weights = jnp.sqrt(weights)
+
+    weighted_b = sqrt_weights * b
+
+    def _solve_core(
+        A: Float[Array, "B p"],
+        b: Float[Array, "B"],
+        *,
+        l2_regularization: Optional[float] = None,
+    ) -> Float[Array, "p"]:
+        if l2_regularization is None:
+            sol = jnp.linalg.lstsq(A, b, rcond=cutoff)[0]
+        else:
+            AT = A.T
+            sol = jnp.linalg.solve(
+                jnp.dot(AT, A) + l2_regularization * jnp.eye(A.shape[1]), jnp.dot(AT, b)
+            )
+        return sol
+
+    def _compute_left_right_stack(
+        tt: TT, A: list[Float[Array, "B m"]]
+    ) -> tuple[list[Float[Array, "B r"]], list[Float[Array, "B r"]]]:
+        ranks = tt_ranks(tt)
+        left = [None] * order
+        left[0] = jnp.ones((B, ranks[0]))  # (B, 1)
+        right = [jnp.ones((B, r)) for r in ranks[1:]]
+        for k in range(order - 1, 0, -1):
+            right[k - 1] = jnp.einsum("bk,ijk,bj->bi", right[k], tt[k], A[k])
+        return left, right
+
+    def _cond(val: tuple[int, float, TT, dict]) -> bool:
+        iters, stag, _, _ = val
+        return (iters < max_iters) & (stag > stagnation)
+
+    def _body(val: tuple[int, float, TT, dict]) -> tuple[int, float, TT, dict]:
+        iters, stag, x0, infos = val
+        guess = tt_orth_right(x0)  # right-orthonormalize components
+
+        left, right = _compute_left_right_stack(guess, A)
+        # forward sweep
+        for mu in range(0, order - 1):
+            # solve for the new core
+            L = left[mu]  # (B, r_{mu-1})
+            M = A[mu]  # (B, m_\mu)
+            R = right[mu]  # (B, r_\mu)
+            # features = jax.vmap(outer_products)(L, M, R).reshape( # replace by jnp.einsum("bl,bm,br->blmr", L, M, R).reshape()
+            #     (B, -1)
+            # )  # (B, r_{mu-1} x m_\mu x r_\mu)
+            features = jnp.einsum("bl,bm,br->blmr", L, M, R).reshape((B, -1))
+            weighted_features = sqrt_weights[:, None] * features
+            new_core = _solve_core(
+                weighted_features,
+                weighted_b,
+                l2_regularization=l2_regularization,
+            )
+            core = jnp.reshape(new_core, guess[mu].shape)
+
+            # orthogonalize
+            guess[mu], guess[mu + 1] = tt_shift_right(core, guess[mu + 1])
+            # update 'left'
+            left[mu + 1] = jnp.einsum("bi,ijk,bj->bk", L, guess[mu], M)
+
+        # backward sweep
+        for mu in range(order - 1, -1, -1):
+            # solve for the new core
+            L = left[mu]
+            M = A[mu]
+            R = right[mu]
+            # features = jax.vmap(outer_products)(L, M, R).reshape(
+            #     (B, -1)
+            # )  # (B, r_{mu-1} x m_\mu x r_\mu)
+            features = jnp.einsum("bl,bm,br->blmr", L, M, R).reshape((B, -1))
+            weighted_features = sqrt_weights[:, None] * features
+            new_core = _solve_core(
+                weighted_features,
+                weighted_b,
+                l2_regularization=l2_regularization,
+            )
+            core = jnp.reshape(new_core, guess[mu].shape)
+
+            # orthogonalize
+            if mu > 0:
+                guess[mu - 1], guess[mu] = tt_shift_left(guess[mu - 1], core)
+                # update 'right'
+                right[mu - 1] = jnp.einsum("bk,ijk,bj->bi", R, guess[mu], M)
+            else:
+                guess[mu] = core
+
+        residual = jnp.sum((weighted_features @ new_core - weighted_b) ** 2)
+        stag = _compute_stagnation(x0, guess)
+        iters += 1
+        # store informations
+        infos["residual"] = infos["residual"].at[iters - 1].set(residual)
+        infos["stagnation"] = infos["stagnation"].at[iters - 1].set(stag)
+        # jax.debug.print(
+        #     "iters={iters}, stag={stag}, relative l2={l2}",
+        #     iters=iters,
+        #     stag=stag,
+        #     l2=jnp.sqrt(residual / jnp.sum(weighted_b**2)),
+        # )
+
+        return iters, stag, guess, infos
+
+    init_val = (
+        0,
+        jnp.inf,
+        x0,
+        {"residual": jnp.zeros(max_iters), "stagnation": jnp.zeros(max_iters)},
+    )
+    iters, stag, guess, infos = jax.lax.while_loop(_cond, _body, init_val=init_val)
+    # while _cond(init_val):
+    #     init_val = _body(init_val)
+    # iters, stag, guess, infos = init_val
+    # truncate infos
+    infos["residual"] = infos["residual"][:iters]
+    infos["stagnation"] = infos["stagnation"][:iters]
+    return iters, stag, guess, infos
 
 
 # TODO: MALS
