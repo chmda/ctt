@@ -52,7 +52,7 @@ learning_rate = "line_search"
 [[experiment]]
 name = "sos"
 seed = 42
-dim = 4
+dim = 5
 n_features = 2
 domain = [0, 1]
 num_train = 2048
@@ -62,18 +62,19 @@ num_layers = 2
 sketching_rank = 40
 [[experiment.optimizer]]
 name = "ngd"
+# num_iterations = 10_000
 num_iterations = 10_000
-learning_rate = 0.7     # 0.5 -> 2e-6
+learning_rate = 0.5     # 0.5 -> 2e-6
 # learning_rate = "line_search"
-damping_coeff = 1e-12          # 1e-11 -> 2e-6
+damping_coeff = 1e-11          # 1e-11 -> 2e-6
 adaptive_damping_coeff = false
 [[experiment.optimizer]]
 name = "adam"
-num_iterations = 1_000
+num_iterations = 10_000
 learning_rate = "line_search"
 [[experiment.optimizer]]
 name = "lbfgs"
-num_iterations = 1_000
+num_iterations = 10_000
 learning_rate = "line_search"
 # d=3
 # num_train = 2048

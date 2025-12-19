@@ -18,7 +18,11 @@ plt.rcParams.update(
         "text.usetex": True,
         "font.family": "sans-serif",
         "font.sans-serif": ["Verdana", "Arial", "Open Sans", "DejaVu Sans"],
-        "font.size": 12,
+        "font.size": 14,  # 12,
+        "axes.labelsize": 14,  # axis labels
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+        "legend.fontsize": 14,
     }
 )
 
@@ -63,7 +67,8 @@ for sketching_size, path in files:
         max_len = max(max_len, len(rel_l2))
 
 # Plot setup
-plt.figure(figsize=(15, 8))
+# plt.figure(figsize=(15, 8))
+plt.figure(figsize=(6, 4))
 for i, (sketching_size, rel_l2) in enumerate(data):
     x = jnp.arange(1, len(rel_l2) + 1)
     style = line_styles[i % len(line_styles)]

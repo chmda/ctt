@@ -36,7 +36,12 @@ plt.rcParams.update(
         "text.usetex": True,
         "font.family": "sans-serif",
         "font.sans-serif": ["Verdana", "Arial", "Open Sans", "DejaVu Sans"],
-        "font.size": 12,
+        # "font.size": 12,
+        "font.size": 14,  # 12,
+        "axes.labelsize": 14,  # axis labels
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+        "legend.fontsize": 14,
     }
 )
 
@@ -410,7 +415,7 @@ print("Running experiments...")
 
 seed = 0
 key = random.key(seed)
-N_EXPERIMENTS = 100
+N_EXPERIMENTS = 25
 
 rel_l2 = []
 condition_numbers = []
@@ -445,7 +450,8 @@ condition_numbers_median = jnp.median(
 condition_numbers_q1 = jnp.percentile(condition_numbers, 25, axis=0)
 condition_numbers_q3 = jnp.percentile(condition_numbers, 75, axis=0)
 
-fig, ax1 = plt.subplots(figsize=(15, 8))
+# fig, ax1 = plt.subplots(figsize=(15, 8))
+fig, ax1 = plt.subplots(figsize=(6, 4))
 
 num_markers = 10
 marker_positions = jnp.unique(
@@ -537,7 +543,7 @@ ranks_median = jnp.median(ranks, axis=0)  # (n_iterations, n_layers)
 ranks_q1 = jnp.percentile(ranks, 25, axis=0)
 ranks_q3 = jnp.percentile(ranks, 75, axis=0)
 
-fig, ax1 = plt.subplots(figsize=(15, 8))
+fig, ax1 = plt.subplots(figsize=(6, 4))
 
 for i, ls, marker, color in zip(
     range(experiment.num_layers),

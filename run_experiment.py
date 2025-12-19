@@ -56,7 +56,12 @@ plt.rcParams.update(
         "text.usetex": True,
         "font.family": "sans-serif",
         "font.sans-serif": ["Verdana", "Arial", "Open Sans", "DejaVu Sans"],
-        "font.size": 12,
+        # "font.size": 12,
+        "font.size": 14,  # 12,
+        "axes.labelsize": 14,  # axis labels
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+        "legend.fontsize": 14,
     }
 )
 
@@ -105,6 +110,7 @@ class Experiment:
     rank: Optional[int] = None
     init_constant: float = 2.0
     d_lift: Optional[float] = None
+    sketching_rank: Optional[int] = None
 
     def __post_init__(self):
         """Ensure optimizers are initialized as Optimizer objects."""
@@ -1039,7 +1045,8 @@ jnp.savez(
 # plot the results
 
 # loss
-plt.figure(figsize=(15, 8))
+# plt.figure(figsize=(15, 8))
+plt.figure(figsize=(6, 4))
 
 data = [
     ("NGD", opt_ngd.num_iterations, rel_l2_ngd),
@@ -1088,7 +1095,8 @@ plt.savefig(
 plt.show()
 
 # timing
-plt.figure(figsize=(15, 8))
+# plt.figure(figsize=(15, 8))
+plt.figure(figsize=(6, 4))
 
 times_ngd = jnp.asarray([info["time"] for info in infos_ngd])
 indices_ngd = (
